@@ -4,17 +4,20 @@ TradeBot is a Bybit Demo-only intraday trading platform built with a React front
 
 ## Current Status
 
-- Frontend: deployed and operational in safe offline mode
+- Frontend: deployed on Render and configured with the Node backend URL
+- Node.js backend: deployed and healthy on Render
+- Python strategy engine: deployed and healthy on Render
 - Phase 1 — Hybrid Backend Foundation: completed
 - Phase 1.5 — Market Data Collection & Freshness Foundation: completed
-- Current backend progress: 30%
+- Phase 2 — Dashboard Backend: completed
+- Current backend progress: 45%
 - Exchange mode: Bybit Demo only
 - Testnet: disabled
 - Real trading: disabled
 - Mock, seeded, sample, cached-fallback, or fabricated trading data: prohibited
 - Execution: disabled until the dedicated execution phases are implemented and approved
 
-Until the full backend is connected, the frontend must show only real backend data or safe states such as `Not Connected`, `No Data`, and `0`. Trading controls must fail closed.
+The Dashboard backend now returns real Bybit Demo account metrics. The current frontend Dashboard is still a static disconnected view and must be integrated with the completed Dashboard endpoints before Phase 3 begins.
 
 ## Frontend Navigation
 
@@ -137,6 +140,50 @@ GET /api/market/freshness/:symbol
 
 Supported candle intervals are `5`, `15`, and `60`.
 
+### Phase 2 — Dashboard Backend ✅
+
+- Bybit Demo wallet balance and total equity
+- available balance and unrealised P&L
+- open positions
+- daily realised P&L
+- daily trade count, wins, losses, and win rate
+- engine status and recent activity state
+- system-health endpoint
+- fail-closed start and stop controls
+- safe handling of HTML, malformed JSON, and invalid Bybit API responses
+- no secret, signature, or upstream response-body logging
+
+Available Dashboard endpoints:
+
+```text
+GET  /api/dashboard/summary
+GET  /api/dashboard/system-health
+POST /api/dashboard/engine/start
+POST /api/dashboard/engine/stop
+```
+
+## Deployment Status
+
+```text
+Frontend
+https://tradebot-giga.onrender.com
+
+Node.js Backend
+https://tradebot-node-backend.onrender.com
+
+Python Strategy Engine
+https://tradebot-python-engine.onrender.com
+```
+
+Validated runtime status:
+
+- Node `/health`: healthy
+- Node `/ready`: ready
+- Python `/health`: healthy
+- Bybit Demo account: configured
+- Bybit V5 public market data: configured
+- execution authority: disabled
+
 ## Safety Rules
 
 - Bybit Demo only for all authenticated trading operations
@@ -163,18 +210,16 @@ Supported candle intervals are `5`, `15`, and `60`.
 
 ## Page-by-Page Backend Roadmap
 
-### Phase 2 — Dashboard Backend
+### Phase 2.1 — Dashboard Frontend Integration
 
-- Demo Balance
-- Today P&L
-- Open Trades
-- Today’s Trades
-- Win Rate
-- Engine Status
-- Active Strategy Summary
-- System Health
-- Recent Activity
-- Start Engine and Stop Engine
+- fetch real Dashboard summary data
+- fetch real system-health data
+- render Demo balance, P&L, trades, win rate, and engine status
+- connect Start Engine and Stop Engine controls to the Node API
+- add loading, retry, timeout, and safe disconnected states
+- handle Render free-tier cold starts
+- keep execution disabled
+- use no mock data
 
 ### Phase 3 — Market Scanner
 
@@ -256,32 +301,16 @@ TradeBot/
 
 The frontend remains at the repository root so the current Render deployment is not broken.
 
-## Deployment Plan
-
-```text
-React Frontend
-→ Render Static Site
-
-Node.js Backend
-→ Render Web Service
-
-Python Strategy Engine
-→ Render Private Service or protected internal Web Service
-
-Database
-→ PostgreSQL
-```
-
 ## Frontend Environment Variable
 
 ```env
-VITE_API_BASE_URL=https://your-node-backend.onrender.com
+VITE_API_BASE_URL=https://tradebot-node-backend.onrender.com
 ```
 
 `VITE_API_BASE_URL` is public frontend configuration, not a secret. Do not place Bybit keys, Telegram credentials, database URLs, or internal service secrets in any `VITE_` variable.
 
 ## Next Development Step — Awaiting Approval
 
-**Phase 2 — Dashboard Backend**
+**Phase 2.1 — Dashboard Frontend Integration**
 
-The next approved development unit is the Dashboard backend foundation. It will expose real backend status and account metrics only, remain fail-closed, and use no mock data. No Phase 2 code should start until the project owner explicitly approves it.
+The next development unit is to replace the static disconnected Dashboard with real data from the completed Dashboard backend endpoints. No Phase 2.1 code should start until the project owner explicitly approves it.
