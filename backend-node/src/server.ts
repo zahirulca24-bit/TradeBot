@@ -2,6 +2,8 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { z } from 'zod';
+import { BybitDemoClient } from './bybitDemo.js';
+import { DashboardService } from './dashboard.js';
 import { BybitMarketDataClient } from './marketData.js';
 
 const envSchema = z.object({
@@ -15,6 +17,11 @@ const envSchema = z.object({
   MARKET_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(10000).default(5000),
   MARKET_MAX_CLOCK_SKEW_MS: z.coerce.number().int().min(250).max(10000).default(3000),
   MARKET_MAX_CANDLE_LAG_MS: z.coerce.number().int().min(0).max(300000).default(90000),
+  BYBIT_DEMO_BASE_URL: z.literal('https://api-demo.bybit.com').default('https://api-demo.bybit.com'),
+  BYBIT_DEMO_API_KEY: z.string().min(8).optional().or(z.literal('')),
+  BYBIT_DEMO_API_SECRET: z.string().min(8).optional().or(z.literal('')),
+  BYBIT_DEMO_RECV_WINDOW: z.coerce.number().int().min(1000).max(10000).default(5000),
+  BYBIT_DEMO_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(10000).default(5000),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
@@ -27,6 +34,17 @@ const marketData = parsedEnv.success
       maxClosedCandleLagMs: parsedEnv.data.MARKET_MAX_CANDLE_LAG_MS,
     })
   : null;
+const demoClient =
+  parsedEnv.success && parsedEnv.data.BYBIT_DEMO_API_KEY && parsedEnv.data.BYBIT_DEMO_API_SECRET
+    ? new BybitDemoClient({
+        baseUrl: parsedEnv.data.BYBIT_DEMO_BASE_URL,
+        apiKey: parsedEnv.data.BYBIT_DEMO_API_KEY,
+        apiSecret: parsedEnv.data.BYBIT_DEMO_API_SECRET,
+        recvWindow: parsedEnv.data.BYBIT_DEMO_RECV_WINDOW,
+        requestTimeoutMs: parsedEnv.data.BYBIT_DEMO_REQUEST_TIMEOUT_MS,
+      })
+    : null;
+const dashboard = new DashboardService(demoClient);
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
@@ -48,6 +66,17 @@ function marketFailure(response: express.Response, error: unknown) {
   });
 }
 
+function dashboardFailure(response: express.Response, error: unknown) {
+  const code = error instanceof Error ? error.message : 'DASHBOARD_FAILURE';
+  return response.status(503).json({
+    error: {
+      code,
+      message: 'Dashboard data is unavailable from Bybit Demo.',
+      actionable: false,
+    },
+  });
+}
+
 app.get('/health', (_request, response) => {
   response.status(200).json({
     service: 'tradebot-backend-node',
@@ -55,6 +84,7 @@ app.get('/health', (_request, response) => {
     tradingMode: parsedEnv.success ? parsedEnv.data.TRADING_MODE : 'unconfigured',
     executionEnabled: false,
     marketDataConfigured: marketData !== null,
+    bybitDemoConfigured: demoClient !== null,
   });
 });
 
@@ -92,6 +122,7 @@ app.get('/ready', async (_request, response) => {
       tradingMode: 'bybit_demo',
       executionEnabled: false,
       marketData: { source: 'bybit-v5-public', clockSkewMs: clock.skewMs },
+      dashboard: { demoAccountConfigured: demoClient !== null },
     });
   } catch (error) {
     return response.status(503).json({
@@ -100,6 +131,75 @@ app.get('/ready', async (_request, response) => {
       reason: error instanceof Error ? error.message : 'DEPENDENCY_UNREACHABLE',
     });
   }
+});
+
+app.get('/api/dashboard/summary', async (_request, response) => {
+  try {
+    return response.status(200).json(await dashboard.getSummary());
+  } catch (error) {
+    return dashboardFailure(response, error);
+  }
+});
+
+app.get('/api/dashboard/system-health', async (_request, response) => {
+  if (!parsedEnv.success || !marketData) {
+    return response.status(503).json({
+      ready: false,
+      tradingMode: 'unconfigured',
+      executionEnabled: false,
+      dependencies: { marketData: false, pythonEngine: false, bybitDemo: false },
+    });
+  }
+  try {
+    const [clock, pythonResponse] = await Promise.all([
+      marketData.assertClockSafe(),
+      fetch(`${parsedEnv.data.PYTHON_ENGINE_URL}/ready`, {
+        headers: { 'x-internal-service-token': parsedEnv.data.INTERNAL_SERVICE_TOKEN },
+        signal: AbortSignal.timeout(3000),
+      }),
+    ]);
+    const pythonBody = await pythonResponse.json();
+    return response.status(pythonResponse.ok && pythonBody?.ready === true ? 200 : 503).json({
+      ready: pythonResponse.ok && pythonBody?.ready === true,
+      tradingMode: 'bybit_demo',
+      executionEnabled: false,
+      dependencies: {
+        marketData: true,
+        pythonEngine: pythonResponse.ok && pythonBody?.ready === true,
+        bybitDemo: demoClient !== null,
+      },
+      clockSkewMs: clock.skewMs,
+    });
+  } catch (error) {
+    return dashboardFailure(response, error);
+  }
+});
+
+app.post('/api/dashboard/engine/start', async (_request, response) => {
+  if (!parsedEnv.success || !marketData) {
+    return response.status(503).json({ accepted: false, engineStatus: 'BLOCKED', reason: 'INVALID_ENVIRONMENT' });
+  }
+  try {
+    const [clock, pythonResponse] = await Promise.all([
+      marketData.assertClockSafe(),
+      fetch(`${parsedEnv.data.PYTHON_ENGINE_URL}/ready`, {
+        headers: { 'x-internal-service-token': parsedEnv.data.INTERNAL_SERVICE_TOKEN },
+        signal: AbortSignal.timeout(3000),
+      }),
+    ]);
+    const pythonBody = await pythonResponse.json();
+    if (!pythonResponse.ok || pythonBody?.ready !== true || clock.skewMs > parsedEnv.data.MARKET_MAX_CLOCK_SKEW_MS) {
+      return response.status(503).json({ accepted: false, engineStatus: 'BLOCKED', reason: 'DEPENDENCY_NOT_READY' });
+    }
+    const result = dashboard.startEngine();
+    return response.status(result.accepted ? 200 : 503).json(result);
+  } catch (error) {
+    return dashboardFailure(response, error);
+  }
+});
+
+app.post('/api/dashboard/engine/stop', (_request, response) => {
+  return response.status(200).json(dashboard.stopEngine());
 });
 
 app.get('/api/market/symbols', async (_request, response) => {
@@ -156,11 +256,7 @@ app.get('/api/market/candles/:symbol/:interval', async (request, response) => {
   }
 
   try {
-    const candles = await marketData.getClosedCandles(
-      params.data.symbol,
-      params.data.interval,
-      limit.data,
-    );
+    const candles = await marketData.getClosedCandles(params.data.symbol, params.data.interval, limit.data);
     return response.status(200).json({
       source: 'bybit-v5-public',
       category: 'linear',
@@ -180,9 +276,7 @@ app.get('/api/market/freshness/:symbol', async (request, response) => {
   if (!marketData) return marketFailure(response, new Error('INVALID_ENVIRONMENT'));
   const symbol = request.params.symbol?.toUpperCase();
   if (!symbol || !/^[A-Z0-9]{3,30}$/.test(symbol)) {
-    return response.status(400).json({
-      error: { code: 'INVALID_SYMBOL', message: 'Invalid market symbol.' },
-    });
+    return response.status(400).json({ error: { code: 'INVALID_SYMBOL', message: 'Invalid market symbol.' } });
   }
   try {
     return response.status(200).json(await marketData.getFreshnessSnapshot(symbol));
