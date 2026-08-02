@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { BybitDemoClient } from './bybitDemo.js';
 
 export type EngineStatus = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'BLOCKED';
@@ -17,7 +18,7 @@ export class DashboardService {
 
   private addActivity(type: string, message: string) {
     this.activity.unshift({
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       type,
       message,
       createdAt: new Date().toISOString(),
