@@ -89,8 +89,56 @@ export class BybitDemoClient {
       },
       signal: AbortSignal.timeout(this.config.requestTimeoutMs),
     });
-    if (!response.ok) throw new Error(`BYBIT_DEMO_HTTP_${response.status}`);
-    const envelope = envelopeSchema.parse(await response.json());
+
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    const requestId = response.headers.get('x-bapi-request-id') ?? response.headers.get('cf-ray') ?? 'unavailable';
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      console.warn('Bybit Demo HTTP failure', {
+        path,
+        status: response.status,
+        contentType,
+        requestId,
+      });
+      throw new Error(`BYBIT_DEMO_HTTP_${response.status}`);
+    }
+
+    if (!contentType.includes('application/json')) {
+      console.warn('Bybit Demo returned a non-JSON response', {
+        path,
+        status: response.status,
+        contentType: contentType || 'missing',
+        requestId,
+      });
+      throw new Error('BYBIT_DEMO_INVALID_RESPONSE');
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      console.warn('Bybit Demo returned malformed JSON', {
+        path,
+        status: response.status,
+        contentType,
+        requestId,
+      });
+      throw new Error('BYBIT_DEMO_INVALID_JSON');
+    }
+
+    const envelopeResult = envelopeSchema.safeParse(payload);
+    if (!envelopeResult.success) {
+      console.warn('Bybit Demo response contract validation failed', {
+        path,
+        status: response.status,
+        contentType,
+        requestId,
+      });
+      throw new Error('BYBIT_DEMO_INVALID_ENVELOPE');
+    }
+
+    const envelope = envelopeResult.data;
     if (envelope.retCode !== 0) throw new Error(`BYBIT_DEMO_${envelope.retCode}_${envelope.retMsg}`);
     return envelope.result;
   }
