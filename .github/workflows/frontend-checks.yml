@@ -1,4 +1,4 @@
-name: Frontend Checks
+name: TradeBot Checks
 
 on:
   pull_request:
@@ -6,8 +6,24 @@ on:
     branches: [main]
 
 jobs:
-  validate:
+  frontend:
+    name: Frontend
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - run: npm run lint
+      - run: npm run build
+
+  backend-node:
+    name: Node Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-node
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
