@@ -185,19 +185,36 @@ export class BybitMarketDataClient {
 
     const candles = result.list
       .map((row) => {
-        const startTimeMs = Number(row[0]);
+        const [startRaw, openRaw, highRaw, lowRaw, closeRaw, volumeRaw, turnoverRaw] = row;
+        if (
+          startRaw === undefined ||
+          openRaw === undefined ||
+          highRaw === undefined ||
+          lowRaw === undefined ||
+          closeRaw === undefined ||
+          volumeRaw === undefined ||
+          turnoverRaw === undefined
+        ) {
+          throw new Error('INVALID_KLINE_ROW');
+        }
+
+        const startTimeMs = Number(startRaw);
+        if (!Number.isSafeInteger(startTimeMs) || startTimeMs <= 0) {
+          throw new Error('INVALID_KLINE_START_TIME');
+        }
+
         const closeTimeMs = startTimeMs + duration;
         return {
           symbol: result.symbol,
           interval,
           startTimeMs,
           closeTimeMs,
-          open: assertFinitePositive(row[1], 'open'),
-          high: assertFinitePositive(row[2], 'high'),
-          low: assertFinitePositive(row[3], 'low'),
-          close: assertFinitePositive(row[4], 'close'),
-          volume: assertFinitePositive(row[5], 'volume'),
-          turnover: assertFinitePositive(row[6], 'turnover'),
+          open: assertFinitePositive(openRaw, 'open'),
+          high: assertFinitePositive(highRaw, 'high'),
+          low: assertFinitePositive(lowRaw, 'low'),
+          close: assertFinitePositive(closeRaw, 'close'),
+          volume: assertFinitePositive(volumeRaw, 'volume'),
+          turnover: assertFinitePositive(turnoverRaw, 'turnover'),
           receivedAtMs,
           ageMs: serverTimeMs - closeTimeMs,
         } satisfies ClosedCandle;
