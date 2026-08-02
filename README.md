@@ -1,17 +1,20 @@
 # TradeBot — Bybit Intraday Demo Trading Platform
 
-TradeBot is a Bybit Demo-only intraday trading platform. The React frontend is deployed and the backend will be implemented page by page using a hybrid Node.js and Python architecture.
+TradeBot is a Bybit Demo-only intraday trading platform built with a React frontend and a hybrid Node.js + Python backend architecture.
 
 ## Current Status
 
 - Frontend: deployed and operational in safe offline mode
-- Backend: not implemented yet
+- Phase 1 — Hybrid Backend Foundation: completed
+- Phase 1.5 — Market Data Collection & Freshness Foundation: completed
+- Current backend progress: 30%
 - Exchange mode: Bybit Demo only
 - Testnet: disabled
 - Real trading: disabled
-- Mock, seeded, sample, or fabricated trading data: prohibited
+- Mock, seeded, sample, cached-fallback, or fabricated trading data: prohibited
+- Execution: disabled until the dedicated execution phases are implemented and approved
 
-Until the backend is connected, the frontend must show only `Not Connected`, `No Data`, `0`, or equivalent empty states. Trading controls must fail closed.
+Until the full backend is connected, the frontend must show only real backend data or safe states such as `Not Connected`, `No Data`, and `0`. Trading controls must fail closed.
 
 ## Frontend Navigation
 
@@ -34,7 +37,7 @@ Settings contains exactly five tabs:
 
 ### Node.js Service — API Gateway and Final Authority
 
-The Node.js service will own:
+The Node.js service owns or will own:
 
 - frontend API endpoints
 - authentication and control-token validation
@@ -54,7 +57,7 @@ Node.js is the final authority for risk, execution, exchange confirmation, trade
 
 ### Python Service — Strategy and Analytics Engine
 
-The Python service will own:
+The Python service owns or will own:
 
 - market-data processing
 - technical-indicator calculation
@@ -74,9 +77,9 @@ Python must never place or close exchange orders directly.
 ## Authority Flow
 
 ```text
-Bybit Demo market data
+Bybit market data
         ↓
-Node.js snapshot and validation
+Node.js collection and validation
         ↓
 Python strategy analysis
         ↓
@@ -93,13 +96,57 @@ Frontend
 
 The frontend must call only the Node.js API. It must never call the Python service or Bybit directly.
 
+## Completed Foundation
+
+### Phase 1 — Hybrid Foundation ✅
+
+- Node.js API service scaffold
+- Python FastAPI strategy-service scaffold
+- shared contracts
+- health and readiness endpoints
+- internal service authentication
+- environment validation
+- separated frontend and backend CI validation
+- Bybit Demo-only safety lock
+- fail-closed readiness
+
+### Phase 1.5 — Market Data Collection & Freshness Foundation ✅
+
+- Bybit V5 public market-data client in Node.js
+- Bybit server-time collection
+- trading USDT linear perpetual symbol discovery
+- ticker collection
+- 5M, 15M, and 1H kline collection
+- closed-candle-only filtering
+- open candle exclusion
+- clock-skew validation
+- stale and future-dated candle rejection
+- OHLC range validation
+- positive price, volume, and turnover validation
+- fail-closed market-data errors
+- market-data readiness integration
+
+Available market-data endpoints:
+
+```text
+GET /api/market/symbols
+GET /api/market/tickers?symbol=BTCUSDT
+GET /api/market/candles/:symbol/:interval
+GET /api/market/freshness/:symbol
+```
+
+Supported candle intervals are `5`, `15`, and `60`.
+
 ## Safety Rules
 
-- Bybit Demo only
+- Bybit Demo only for all authenticated trading operations
+- official Bybit public market-data source only
 - no Testnet mode
 - no real-trading mode
 - no mock fallback in any trading path
-- Python unavailable or invalid response means execution is blocked
+- only validated closed candles are actionable
+- stale, future-dated, incomplete, invalid, or unreachable market data blocks action
+- Python unavailable or invalid response blocks execution
 - Node.js performs final risk validation
 - exchange response, fill status, and protection state must be confirmed before a trade becomes active
 - API keys and secrets remain in backend environment variables only
@@ -115,18 +162,6 @@ The frontend must call only the Node.js API. It must never call the Python servi
 - Maximum active trades: `5`
 
 ## Page-by-Page Backend Roadmap
-
-### Phase 1 — Hybrid Foundation
-
-- Node.js API service
-- Python strategy service
-- shared contracts
-- health and readiness endpoints
-- internal service authentication
-- environment validation
-- database foundation
-- unified error format
-- Bybit Demo-only safety lock
 
 ### Phase 2 — Dashboard Backend
 
@@ -205,23 +240,21 @@ Backend-controlled settings and diagnostics for:
 - Diagnostics
 - Decision Log
 
-## Planned Repository Structure
-
-The existing frontend currently remains at the repository root. Backend folders will be introduced safely without breaking the deployed frontend.
+## Repository Structure
 
 ```text
 TradeBot/
 ├── src/                       # Current React frontend
-├── backend-node/              # Planned Node.js API and execution service
-├── engine-python/             # Planned Python strategy service
-├── shared/                    # Planned API contracts and schemas
+├── backend-node/              # Node.js API and authority service
+├── engine-python/             # Python strategy service
+├── shared/                    # Shared contracts and schemas
 ├── docs/                      # Architecture and operations documentation
 ├── infrastructure/            # Planned deployment configuration
 ├── package.json
 └── README.md
 ```
 
-The frontend will not be moved into a new folder until deployment settings and migration steps are prepared and verified.
+The frontend remains at the repository root so the current Render deployment is not broken.
 
 ## Deployment Plan
 
@@ -247,28 +280,8 @@ VITE_API_BASE_URL=https://your-node-backend.onrender.com
 
 `VITE_API_BASE_URL` is public frontend configuration, not a secret. Do not place Bybit keys, Telegram credentials, database URLs, or internal service secrets in any `VITE_` variable.
 
-When no backend exists, omit this variable. After the Node.js backend is deployed, add the backend URL and rebuild the frontend.
+## Next Development Step — Awaiting Approval
 
-## Frontend Local Commands
+**Phase 2 — Dashboard Backend**
 
-```bash
-npm install
-npm run lint
-npm run build
-npm run dev
-```
-
-## Render Frontend Settings
-
-- Service type: Static Site
-- Branch: `main`
-- Root Directory: leave blank
-- Build Command: `npm install && npm run build`
-- Publish Directory: `dist`
-- Environment Variable: `VITE_API_BASE_URL` after backend deployment
-
-The frontend currently uses hash routing, so navigation does not require server-side SPA rewrites.
-
-## Next Development Step
-
-Begin Phase 1: Hybrid Backend Foundation. Backend functionality will be implemented and validated one page at a time before moving to the next page.
+The next approved development unit is the Dashboard backend foundation. It will expose real backend status and account metrics only, remain fail-closed, and use no mock data. No Phase 2 code should start until the project owner explicitly approves it.
