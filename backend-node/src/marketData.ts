@@ -83,6 +83,20 @@ function assertFinitePositive(value: string, field: string): number {
   return parsed;
 }
 
+function parseOptionalPositive(value: string | undefined, field: string): number | null {
+  if (value === undefined || value === '') return null;
+  return assertFinitePositive(value, field);
+}
+
+function assertCandleRange(candle: Pick<ClosedCandle, 'open' | 'high' | 'low' | 'close'>): void {
+  if (candle.high < candle.low || candle.high < candle.open || candle.high < candle.close) {
+    throw new Error('INVALID_CANDLE_RANGE');
+  }
+  if (candle.low > candle.open || candle.low > candle.close) {
+    throw new Error('INVALID_CANDLE_RANGE');
+  }
+}
+
 export class BybitMarketDataClient {
   public constructor(private readonly config: MarketDataConfig) {}
 
@@ -97,7 +111,17 @@ export class BybitMarketDataClient {
     });
     if (!response.ok) throw new Error(`BYBIT_HTTP_${response.status}`);
 
-    const envelope = bybitEnvelopeSchema.parse(await response.json());
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (!contentType.includes('application/json')) throw new Error('BYBIT_INVALID_RESPONSE');
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error('BYBIT_INVALID_JSON');
+    }
+
+    const envelope = bybitEnvelopeSchema.parse(payload);
     if (envelope.retCode !== 0) throw new Error(`BYBIT_${envelope.retCode}_${envelope.retMsg}`);
     return envelope;
   }
@@ -149,20 +173,33 @@ export class BybitMarketDataClient {
   }
 
   public async getTickers(symbol?: string) {
+    const requestedSymbol = symbol?.toUpperCase();
     const envelope = bybitEnvelopeSchema.parse(
       await this.request('/v5/market/tickers', {
         category: 'linear',
-        ...(symbol ? { symbol: symbol.toUpperCase() } : {}),
+        ...(requestedSymbol ? { symbol: requestedSymbol } : {}),
       }),
     );
-    return tickerResultSchema.parse(envelope.result).list.map((item) => ({
+    const tickers = tickerResultSchema.parse(envelope.result).list.map((item) => ({
       symbol: item.symbol,
       lastPrice: assertFinitePositive(item.lastPrice, 'last_price'),
       volume24h: assertFinitePositive(item.volume24h, 'volume_24h'),
       turnover24h: assertFinitePositive(item.turnover24h, 'turnover_24h'),
-      bid1Price: item.bid1Price ? Number(item.bid1Price) : null,
-      ask1Price: item.ask1Price ? Number(item.ask1Price) : null,
+      bid1Price: parseOptionalPositive(item.bid1Price, 'bid_1_price'),
+      ask1Price: parseOptionalPositive(item.ask1Price, 'ask_1_price'),
     }));
+
+    if (requestedSymbol) {
+      if (tickers.length !== 1 || tickers[0]?.symbol !== requestedSymbol) {
+        throw new Error('TICKER_SYMBOL_MISMATCH');
+      }
+      const ticker = tickers[0];
+      if (ticker.bid1Price !== null && ticker.ask1Price !== null && ticker.bid1Price > ticker.ask1Price) {
+        throw new Error('INVALID_BID_ASK_SPREAD');
+      }
+    }
+
+    return tickers;
   }
 
   public async getClosedCandles(
@@ -170,19 +207,23 @@ export class BybitMarketDataClient {
     interval: SupportedInterval,
     limit = 200,
   ): Promise<ClosedCandle[]> {
+    const requestedSymbol = symbol.toUpperCase();
     const receivedAtMs = Date.now();
     const { serverTimeMs } = await this.assertClockSafe();
     const envelope = bybitEnvelopeSchema.parse(
       await this.request('/v5/market/kline', {
         category: 'linear',
-        symbol: symbol.toUpperCase(),
+        symbol: requestedSymbol,
         interval,
         limit: String(Math.min(Math.max(limit + 1, 2), 1000)),
       }),
     );
     const result = klineResultSchema.parse(envelope.result);
-    const duration = intervalMs[interval];
+    if (result.category !== 'linear' || result.symbol !== requestedSymbol) {
+      throw new Error('KLINE_SYMBOL_OR_CATEGORY_MISMATCH');
+    }
 
+    const duration = intervalMs[interval];
     const candles = result.list
       .map((row) => {
         const [startRaw, openRaw, highRaw, lowRaw, closeRaw, volumeRaw, turnoverRaw] = row;
@@ -204,7 +245,7 @@ export class BybitMarketDataClient {
         }
 
         const closeTimeMs = startTimeMs + duration;
-        return {
+        const candle = {
           symbol: result.symbol,
           interval,
           startTimeMs,
@@ -218,39 +259,45 @@ export class BybitMarketDataClient {
           receivedAtMs,
           ageMs: serverTimeMs - closeTimeMs,
         } satisfies ClosedCandle;
+        assertCandleRange(candle);
+        return candle;
       })
       .filter((candle) => candle.closeTimeMs <= serverTimeMs)
       .sort((a, b) => a.startTimeMs - b.startTimeMs);
 
     if (candles.length === 0) throw new Error('NO_CLOSED_CANDLES');
+
+    for (let index = 1; index < candles.length; index += 1) {
+      const previous = candles[index - 1];
+      const current = candles[index];
+      if (!previous || !current) throw new Error('INVALID_CANDLE_SEQUENCE');
+      if (current.startTimeMs === previous.startTimeMs) throw new Error('DUPLICATE_CANDLE');
+      if (current.startTimeMs - previous.startTimeMs !== duration) throw new Error('CANDLE_GAP_DETECTED');
+    }
+
     const latest = candles.at(-1);
     if (!latest) throw new Error('NO_CLOSED_CANDLES');
     if (latest.ageMs < 0) throw new Error('FUTURE_DATED_CANDLE');
     if (latest.ageMs > duration + this.config.maxClosedCandleLagMs) {
       throw new Error('STALE_MARKET_DATA');
     }
-    if (latest.high < latest.low || latest.high < latest.open || latest.high < latest.close) {
-      throw new Error('INVALID_CANDLE_RANGE');
-    }
-    if (latest.low > latest.open || latest.low > latest.close) {
-      throw new Error('INVALID_CANDLE_RANGE');
-    }
 
     return candles.slice(-limit);
   }
 
   public async getFreshnessSnapshot(symbol: string) {
+    const requestedSymbol = symbol.toUpperCase();
     const [clock, ticker, candles5m, candles15m, candles1h] = await Promise.all([
       this.assertClockSafe(),
-      this.getTickers(symbol),
-      this.getClosedCandles(symbol, '5', 3),
-      this.getClosedCandles(symbol, '15', 3),
-      this.getClosedCandles(symbol, '60', 3),
+      this.getTickers(requestedSymbol),
+      this.getClosedCandles(requestedSymbol, '5', 3),
+      this.getClosedCandles(requestedSymbol, '15', 3),
+      this.getClosedCandles(requestedSymbol, '60', 3),
     ]);
     return {
       source: 'bybit-v5-public',
       category: 'linear',
-      symbol: symbol.toUpperCase(),
+      symbol: requestedSymbol,
       serverTimeMs: clock.serverTimeMs,
       clockSkewMs: clock.skewMs,
       ticker: ticker[0] ?? null,
