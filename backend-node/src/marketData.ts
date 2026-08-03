@@ -267,22 +267,24 @@ export class BybitMarketDataClient {
 
     if (candles.length === 0) throw new Error('NO_CLOSED_CANDLES');
 
-    for (let index = 1; index < candles.length; index += 1) {
-      const previous = candles[index - 1];
-      const current = candles[index];
+    const returnedCandles = candles.slice(-limit);
+
+    for (let index = 1; index < returnedCandles.length; index += 1) {
+      const previous = returnedCandles[index - 1];
+      const current = returnedCandles[index];
       if (!previous || !current) throw new Error('INVALID_CANDLE_SEQUENCE');
       if (current.startTimeMs === previous.startTimeMs) throw new Error('DUPLICATE_CANDLE');
       if (current.startTimeMs - previous.startTimeMs !== duration) throw new Error('CANDLE_GAP_DETECTED');
     }
 
-    const latest = candles.at(-1);
+    const latest = returnedCandles.at(-1);
     if (!latest) throw new Error('NO_CLOSED_CANDLES');
     if (latest.ageMs < 0) throw new Error('FUTURE_DATED_CANDLE');
     if (latest.ageMs > duration + this.config.maxClosedCandleLagMs) {
       throw new Error('STALE_MARKET_DATA');
     }
 
-    return candles.slice(-limit);
+    return returnedCandles;
   }
 
   public async getFreshnessSnapshot(symbol: string) {
