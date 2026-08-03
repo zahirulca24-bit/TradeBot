@@ -1,17 +1,3 @@
-import { z } from 'zod';
-
-const readyResponseSchema = z
-  .object({
-    ready: z.boolean(),
-    reason: z.string().optional(),
-    detail: z
-      .object({
-        code: z.string().optional(),
-      })
-      .optional(),
-  })
-  .passthrough();
-
 export interface PythonReadinessOptions {
   baseUrl: string;
   internalServiceToken: string;
@@ -28,6 +14,23 @@ export interface PythonReadinessResult {
 
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getPayloadReason(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.reason === 'string') return payload.reason;
+  if (isRecord(payload.detail) && typeof payload.detail.code === 'string') {
+    return payload.detail.code;
+  }
+  return null;
+}
+
+function isReadyPayload(payload: unknown): boolean {
+  return isRecord(payload) && payload.ready === true;
+}
 
 function normalizeFetchError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'TimeoutError') {
@@ -61,21 +64,15 @@ export async function checkPythonEngineReady(
         lastReason = 'PYTHON_ENGINE_NON_JSON_RESPONSE';
       } else {
         const payload = await response.json().catch(() => null);
-        const parsed = readyResponseSchema.safeParse(payload);
-
-        if (!parsed.success) {
-          lastReason = 'PYTHON_ENGINE_INVALID_JSON';
-        } else if (response.ok && parsed.data.ready === true) {
+        if (response.ok && isReadyPayload(payload)) {
           return {
             ready: true,
             reason: null,
             attempts: attempt,
             upstreamStatus: response.status,
           };
-        } else {
-          lastReason =
-            parsed.data.detail?.code || parsed.data.reason || 'PYTHON_ENGINE_NOT_READY';
         }
+        lastReason = getPayloadReason(payload) || 'PYTHON_ENGINE_NOT_READY';
       }
 
       if (response.status === 401 || response.status === 403) {
