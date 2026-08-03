@@ -4,6 +4,7 @@ import express from 'express';
 import { z } from 'zod';
 import { BybitDemoClient } from './bybitDemo.js';
 import { DashboardService } from './dashboard.js';
+import { FiveMinutePipelineService } from './fiveMinutePipeline.js';
 import { BybitMarketDataClient } from './marketData.js';
 import { checkPythonEngineReady } from './pythonEngine.js';
 import { ScannerService } from './scanner.js';
@@ -65,6 +66,15 @@ const scanner =
         parsedEnv.data.PYTHON_ENGINE_URL,
         parsedEnv.data.INTERNAL_SERVICE_TOKEN,
         universeSelector,
+      )
+    : null;
+const fiveMinutePipeline =
+  parsedEnv.success && marketData && scanner
+    ? new FiveMinutePipelineService(
+        marketData,
+        parsedEnv.data.PYTHON_ENGINE_URL,
+        parsedEnv.data.INTERNAL_SERVICE_TOKEN,
+        scanner,
       )
     : null;
 
@@ -315,6 +325,15 @@ app.get('/api/market/freshness/:symbol', async (request, response) => {
     return response.status(200).json(await marketData.getFreshnessSnapshot(symbol));
   } catch (error) {
     return marketFailure(response, error);
+  }
+});
+
+app.get('/api/scanner/batch/five-minute', async (_request, response) => {
+  if (!fiveMinutePipeline) return scannerFailure(response, new Error('INVALID_ENVIRONMENT'));
+  try {
+    return response.status(200).json(await fiveMinutePipeline.scanTopUniverseFiveMinute());
+  } catch (error) {
+    return scannerFailure(response, error);
   }
 });
 
