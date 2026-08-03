@@ -1,306 +1,260 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React from 'react';
-import {
-  Search,
-  RefreshCw,
-  Play,
-  SlidersHorizontal,
-  ChevronDown,
-  ChevronUp,
-  AlertCircle,
-  Clock,
-  Database,
-  ArrowRight,
-  Info,
-} from 'lucide-react';
+import { AlertCircle, Clock, Database, Play, RefreshCw, Search } from 'lucide-react';
 
 interface MarketScannerViewProps {
   apiBaseUrl: string;
   onTriggerNoBackendWarning: (message: string) => void;
 }
 
-interface PipelineStage {
-  name: string;
-  input: number;
-  passed: number;
-  rejected: number;
-  status: 'Idle' | 'Running' | 'Completed' | 'Error' | 'Not Connected';
+interface SymbolsResponse {
+  source: string;
+  category: string;
+  quoteCoin: string;
+  count: number;
+  symbols: string[];
+  actionable: boolean;
+}
+
+interface Ticker {
+  symbol: string;
+  lastPrice: number;
+  volume24h: number;
+  turnover24h: number;
+  bid1Price: number | null;
+  ask1Price: number | null;
+}
+
+interface TickerResponse {
+  source: string;
+  category: string;
+  count: number;
+  tickers: Ticker[];
+  actionable: boolean;
+}
+
+interface ClosedCandle {
+  symbol: string;
+  interval: '5' | '15' | '60';
+  startTimeMs: number;
+  closeTimeMs: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  turnover: number;
+  receivedAtMs: number;
+  ageMs: number;
+}
+
+interface FreshnessResponse {
+  source: string;
+  category: string;
+  symbol: string;
+  serverTimeMs: number;
+  clockSkewMs: number;
+  ticker: Ticker | null;
+  intervals: {
+    '5': ClosedCandle | null;
+    '15': ClosedCandle | null;
+    '60': ClosedCandle | null;
+  };
+  actionable: boolean;
+}
+
+const REQUEST_TIMEOUT_MS = 15000;
+
+async function requestJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const body = (await response.json().catch(() => null)) as
+    | T
+    | { error?: { code?: string; message?: string } }
+    | null;
+  if (!response.ok) {
+    const errorBody = body as { error?: { code?: string; message?: string } } | null;
+    throw new Error(errorBody?.error?.code || errorBody?.error?.message || `HTTP_${response.status}`);
+  }
+  if (body === null) throw new Error('INVALID_JSON_RESPONSE');
+  return body as T;
+}
+
+function formatNumber(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
 export default function MarketScannerView({
   apiBaseUrl,
   onTriggerNoBackendWarning,
 }: MarketScannerViewProps) {
-  // Filter States
-  const [symbolSearch, setSymbolSearch] = React.useState('');
-  const [directionFilter, setDirectionFilter] = React.useState('ALL');
-  const [gradeFilter, setGradeFilter] = React.useState('ALL');
-  const [statusFilter, setStatusFilter] = React.useState('ALL');
+  const [selectedSymbol, setSelectedSymbol] = React.useState('BTCUSDT');
+  const [symbols, setSymbols] = React.useState<SymbolsResponse | null>(null);
+  const [ticker, setTicker] = React.useState<TickerResponse | null>(null);
+  const [freshness, setFreshness] = React.useState<FreshnessResponse | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
 
-  // Reset function
-  const handleResetFilters = () => {
-    setSymbolSearch('');
-    setDirectionFilter('ALL');
-    setGradeFilter('ALL');
-    setStatusFilter('ALL');
+  const loadMarketData = React.useCallback(async () => {
+    if (!apiBaseUrl) {
+      setError('VITE_API_BASE_URL_NOT_CONFIGURED');
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const [symbolsResult, tickerResult, freshnessResult] = await Promise.all([
+        requestJson<SymbolsResponse>(`${apiBaseUrl}/api/market/symbols`),
+        requestJson<TickerResponse>(
+          `${apiBaseUrl}/api/market/tickers?symbol=${encodeURIComponent(selectedSymbol)}`,
+        ),
+        requestJson<FreshnessResponse>(
+          `${apiBaseUrl}/api/market/freshness/${encodeURIComponent(selectedSymbol)}`,
+        ),
+      ]);
+      setSymbols(symbolsResult);
+      setTicker(tickerResult);
+      setFreshness(freshnessResult);
+      setLastUpdated(new Date());
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : 'MARKET_DATA_LOAD_FAILED';
+      setSymbols(null);
+      setTicker(null);
+      setFreshness(null);
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiBaseUrl, selectedSymbol]);
+
+  React.useEffect(() => {
+    void loadMarketData();
+  }, [loadMarketData]);
+
+  const liveTicker = ticker?.tickers[0] ?? freshness?.ticker ?? null;
+  const online = symbols?.actionable === true && freshness?.actionable === true;
+
+  const handleRefresh = () => {
+    if (!apiBaseUrl) {
+      onTriggerNoBackendWarning('VITE_API_BASE_URL is not configured');
+      return;
+    }
+    void loadMarketData();
   };
 
-  const handleScanNow = () => {
-    onTriggerNoBackendWarning('Scanner backend is not connected');
-  };
-
-  // 6 Exact Sequenced Pipeline Stages:
-  // Market Data → Symbol Filter → 1H Trend → 15M Setup → 5M Confirmation → Final Result
-  const pipelineStages: PipelineStage[] = [
-    { name: 'Market Data', input: 0, passed: 0, rejected: 0, status: 'Not Connected' },
-    { name: 'Symbol Filter', input: 0, passed: 0, rejected: 0, status: 'Not Connected' },
-    { name: '1H Trend', input: 0, passed: 0, rejected: 0, status: 'Not Connected' },
-    { name: '15M Setup', input: 0, passed: 0, rejected: 0, status: 'Not Connected' },
-    { name: '5M Confirmation', input: 0, passed: 0, rejected: 0, status: 'Not Connected' },
-    { name: 'Final Result', input: 0, passed: 0, rejected: 0, status: 'Not Connected' },
-  ];
+  const intervals = [
+    ['5M', freshness?.intervals['5']],
+    ['15M', freshness?.intervals['15']],
+    ['1H', freshness?.intervals['60']],
+  ] as const;
 
   return (
     <div className="space-y-6">
-      {/* Top Header Controls */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-trading-border pb-4">
+      <div className="flex flex-col gap-4 border-b border-trading-border pb-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-            <Search className="h-5 w-5 text-brand-bybit" />
-            <span>Market Scanner</span>
+          <h2 className="flex items-center gap-2 text-lg font-bold text-slate-100">
+            <Search className="h-5 w-5 text-brand-bybit" /> Market Scanner
           </h2>
-          <p className="text-xs text-slate-500 mt-1">
-            Intraday strategy pipeline analyzing live Bybit trading pairs.
+          <p className="mt-1 text-xs text-slate-500">
+            Live Bybit market-data connection. Strategy scanning is not enabled yet.
           </p>
         </div>
-
-        {/* Live Scan Diagnostics */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="rounded-lg bg-card-bg border border-trading-border px-3 py-1.5 text-xs text-slate-400 flex items-center gap-4">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-slate-500 font-semibold uppercase">Scanner:</span>
-              <span className="text-rose-400 font-medium font-mono">Offline</span>
-            </div>
-            <div className="h-3 w-[1px] bg-trading-border" />
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-slate-500 font-semibold uppercase">Data Link:</span>
-              <span className="text-rose-400 font-medium font-mono">No Connection</span>
-            </div>
+          <div className="rounded-lg border border-trading-border bg-card-bg px-3 py-2 text-xs">
+            <span className="mr-2 text-slate-500">Data Link:</span>
+            <span className={online ? 'font-semibold text-emerald-400' : 'font-semibold text-rose-400'}>
+              {loading ? 'CHECKING' : online ? 'ONLINE' : 'OFFLINE'}
+            </span>
           </div>
-
           <button
-            onClick={handleScanNow}
-            className="inline-flex items-center gap-2 rounded-lg bg-brand-bybit px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-brand-bybit/90 active:bg-brand-bybit/80 transition-all cursor-pointer"
+            onClick={handleRefresh}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-lg bg-brand-bybit px-4 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50"
           >
-            <Play className="h-3.5 w-3.5 fill-slate-950" />
-            <span>Scan Now</span>
+            {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            Refresh Data
           </button>
         </div>
       </div>
 
-      {/* Connection States Stats Info Cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="rounded-xl border border-trading-border bg-card-bg p-4 flex items-center gap-3">
-          <div className="rounded-lg bg-dark-bg p-2 text-slate-500 border border-trading-border">
-            <Clock className="h-4.5 w-4.5 text-slate-400" />
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">Last Scan Time</span>
-            <span className="text-xs font-medium font-mono text-slate-300">Never</span>
-          </div>
+      {error && (
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
+          Market data unavailable: <span className="font-mono">{error}</span>. No fallback data is shown.
         </div>
+      )}
 
-        <div className="rounded-xl border border-trading-border bg-card-bg p-4 flex items-center gap-3">
-          <div className="rounded-lg bg-dark-bg p-2 text-slate-500 border border-trading-border">
-            <Clock className="h-4.5 w-4.5 text-slate-400" />
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">Next Scan Interval</span>
-            <span className="text-xs font-medium font-mono text-slate-300">Never (Disconnected)</span>
-          </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-xl border border-trading-border bg-card-bg p-4">
+          <div className="flex items-center gap-2 text-xs text-slate-500"><Database className="h-4 w-4" /> Trading Symbols</div>
+          <p className="mt-3 font-mono text-2xl font-bold text-slate-100">{symbols?.count ?? 0}</p>
+          <p className="mt-1 text-[10px] text-slate-500">USDT linear perpetuals</p>
         </div>
-
-        <div className="rounded-xl border border-trading-border bg-card-bg p-4 flex items-center gap-3">
-          <div className="rounded-lg bg-dark-bg p-2 text-slate-500 border border-trading-border">
-            <Database className="h-4.5 w-4.5 text-slate-400" />
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">Active Connection</span>
-            <span className="text-xs font-medium text-rose-400 truncate max-w-[180px] block">
-              {apiBaseUrl ? apiBaseUrl : 'Not Connected'}
-            </span>
-          </div>
+        <div className="rounded-xl border border-trading-border bg-card-bg p-4">
+          <div className="flex items-center gap-2 text-xs text-slate-500"><Database className="h-4 w-4" /> {selectedSymbol} Price</div>
+          <p className="mt-3 font-mono text-2xl font-bold text-slate-100">{formatNumber(liveTicker?.lastPrice, 4)}</p>
+          <p className="mt-1 text-[10px] text-slate-500">Bid {formatNumber(liveTicker?.bid1Price, 4)} / Ask {formatNumber(liveTicker?.ask1Price, 4)}</p>
+        </div>
+        <div className="rounded-xl border border-trading-border bg-card-bg p-4">
+          <div className="flex items-center gap-2 text-xs text-slate-500"><Clock className="h-4 w-4" /> Clock Skew</div>
+          <p className="mt-3 font-mono text-2xl font-bold text-slate-100">{freshness?.clockSkewMs ?? '—'} ms</p>
+          <p className="mt-1 text-[10px] text-slate-500">Maximum configured: 3000 ms</p>
+        </div>
+        <div className="rounded-xl border border-trading-border bg-card-bg p-4">
+          <div className="flex items-center gap-2 text-xs text-slate-500"><Clock className="h-4 w-4" /> Last Updated</div>
+          <p className="mt-3 font-mono text-sm font-bold text-slate-100">{lastUpdated ? lastUpdated.toLocaleTimeString() : 'Never'}</p>
+          <p className="mt-1 text-[10px] text-slate-500">Live backend response</p>
         </div>
       </div>
 
-      {/* Scanner Pipeline Progression Section */}
-      <div className="rounded-xl border border-trading-border bg-card-bg p-5 shadow-sm space-y-4">
-        <div>
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Scanner Pipeline Stages</h3>
-          <p className="text-[11px] text-slate-500 mt-0.5">
-            Sequential screening filters. All criteria must succeed to produce a trade recommendation.
-          </p>
+      <div className="rounded-xl border border-trading-border bg-card-bg p-5">
+        <div className="flex flex-col gap-3 border-b border-trading-border/70 pb-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100">Market Data Snapshot</h3>
+            <p className="mt-1 text-[11px] text-slate-500">Closed-candle freshness for the selected symbol.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-500" htmlFor="market-symbol">Symbol</label>
+            <select
+              id="market-symbol"
+              value={selectedSymbol}
+              onChange={(event) => setSelectedSymbol(event.target.value)}
+              className="rounded-lg border border-trading-border bg-dark-bg px-3 py-2 text-xs font-mono text-slate-200"
+            >
+              {(symbols?.symbols?.length ? symbols.symbols : [selectedSymbol]).map((symbol) => (
+                <option key={symbol} value={symbol}>{symbol}</option>
+              ))}
+            </select>
+          </div>
         </div>
 
-        {/* Responsive Wrapped Pipeline Stages Container */}
-        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          {pipelineStages.map((stage, idx) => (
-            <div
-              key={stage.name}
-              className="relative rounded-lg border border-trading-border bg-dark-bg/60 p-3.5 flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex items-center justify-between gap-1.5 mb-2.5">
-                  <span className="text-xs font-bold text-slate-300 truncate">{stage.name}</span>
-                  <span className="text-[9px] font-mono text-slate-500 bg-card-bg px-1.5 py-0.5 rounded border border-trading-border/50">
-                    S{idx + 1}
-                  </span>
-                </div>
-
-                <div className="space-y-1.5 text-[11px] font-mono">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">In:</span>
-                    <span className="text-slate-400">{stage.input}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Passed:</span>
-                    <span className="text-emerald-500/80">{stage.passed}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Rejected:</span>
-                    <span className="text-rose-500/80">{stage.rejected}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-4 pt-2.5 border-t border-trading-border/50 flex items-center justify-between">
-                <span className="text-[10px] text-slate-500 font-semibold">Status:</span>
-                <span className="inline-flex items-center rounded-full bg-rose-500/10 px-1.5 py-0.2 text-[9px] font-bold text-rose-400 border border-rose-500/20 uppercase tracking-wide">
-                  {stage.status}
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+          {intervals.map(([label, candle]) => (
+            <div key={label} className="rounded-lg border border-trading-border bg-dark-bg/50 p-4">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-200">{label}</span>
+                <span className={`rounded px-2 py-0.5 text-[10px] font-bold ${candle ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                  {candle ? 'FRESH' : 'NO DATA'}
                 </span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
+                <span className="text-slate-500">Open</span><span className="text-right font-mono text-slate-300">{formatNumber(candle?.open, 4)}</span>
+                <span className="text-slate-500">High</span><span className="text-right font-mono text-slate-300">{formatNumber(candle?.high, 4)}</span>
+                <span className="text-slate-500">Low</span><span className="text-right font-mono text-slate-300">{formatNumber(candle?.low, 4)}</span>
+                <span className="text-slate-500">Close</span><span className="text-right font-mono text-slate-300">{formatNumber(candle?.close, 4)}</span>
+                <span className="text-slate-500">Age</span><span className="text-right font-mono text-slate-300">{candle ? `${Math.round(candle.ageMs / 1000)} sec` : '—'}</span>
               </div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Interactive Controls & Filters */}
-      <div className="rounded-xl border border-trading-border bg-card-bg p-4 shadow-sm space-y-4">
-        <div className="flex items-center justify-between border-b border-trading-border/50 pb-2.5">
-          <div className="flex items-center gap-1.5">
-            <SlidersHorizontal className="h-4 w-4 text-brand-bybit" />
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Scan Filter Rules</span>
-          </div>
-          <button
-            onClick={handleResetFilters}
-            className="text-xs text-slate-500 hover:text-slate-300 transition-colors font-semibold cursor-pointer"
-          >
-            Reset Filters
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Symbol Search */}
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-400 mb-1.5">Symbol Search</label>
-            <input
-              type="text"
-              value={symbolSearch}
-              onChange={(e) => setSymbolSearch(e.target.value.toUpperCase())}
-              placeholder="e.g. BTCUSDT, ETHUSDT"
-              className="block w-full rounded-lg border border-trading-border bg-dark-bg px-3 py-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:border-brand-bybit focus:ring-1 focus:ring-brand-bybit focus:outline-none"
-            />
-          </div>
-
-          {/* Direction */}
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-400 mb-1.5">Setup Direction</label>
-            <select
-              value={directionFilter}
-              onChange={(e) => setDirectionFilter(e.target.value)}
-              className="block w-full rounded-lg border border-trading-border bg-dark-bg px-3 py-2 text-xs text-slate-300 focus:border-brand-bybit focus:outline-none"
-            >
-              <option value="ALL">All Directions</option>
-              <option value="LONG">Long</option>
-              <option value="SHORT">Short</option>
-            </select>
-          </div>
-
-          {/* Grade */}
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-400 mb-1.5">Setup Grade Quality</label>
-            <select
-              value={gradeFilter}
-              onChange={(e) => setGradeFilter(e.target.value)}
-              className="block w-full rounded-lg border border-trading-border bg-dark-bg px-3 py-2 text-xs text-slate-300 focus:border-brand-bybit focus:outline-none"
-            >
-              <option value="ALL">All Grades (A / B / C)</option>
-              <option value="A">Grade A Only</option>
-              <option value="B">Grade B Only</option>
-              <option value="C">Grade C Only</option>
-            </select>
-          </div>
-
-          {/* Status */}
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-400 mb-1.5">Pipeline Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="block w-full rounded-lg border border-trading-border bg-dark-bg px-3 py-2 text-xs text-slate-300 focus:border-brand-bybit focus:outline-none"
-            >
-              <option value="ALL">All Statuses</option>
-              <option value="PASSED">Passed (Target setup valid)</option>
-              <option value="REJECTED">Rejected (Criteria failed)</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Scanner Results Table */}
-      <div className="rounded-xl border border-trading-border bg-card-bg overflow-hidden shadow-sm">
-        <div className="px-5 py-4 border-b border-trading-border flex items-center justify-between bg-card-bg/50">
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-rose-500"></span>
-            <h3 className="font-semibold text-slate-200 text-sm">Scanner Output Matches</h3>
-          </div>
-          <span className="text-[11px] text-slate-500 font-mono">0 pairs matched</span>
-        </div>
-
-        {/* Desktop and Responsive Scrollable Table Container */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-trading-border/80 text-[10px] font-bold text-slate-400 uppercase tracking-wider bg-dark-bg/20">
-                <th className="px-5 py-3">Symbol</th>
-                <th className="px-5 py-3">Direction</th>
-                <th className="px-5 py-3">Setup</th>
-                <th className="px-5 py-3">Grade</th>
-                <th className="px-5 py-3">R:R</th>
-                <th className="px-5 py-3">Status</th>
-                <th className="px-5 py-3 text-right">View</th>
-              </tr>
-            </thead>
-            <tbody>
-              {/* No rows matching backend requirement */}
-              <tr className="border-b border-trading-border/40">
-                <td colSpan={7} className="px-5 py-12 text-center text-slate-500 text-xs">
-                  <div className="flex flex-col items-center justify-center max-w-sm mx-auto">
-                    <AlertCircle className="h-8 w-8 text-slate-600 mb-3" />
-                    <span className="font-semibold text-slate-400 block">No scanner results available</span>
-                    <span className="text-[11px] text-slate-500 mt-1">
-                      The execution portal expects data from the Bybit Intraday Bot backend. Please verify your settings and connect your engine server to see live scanned pairs.
-                    </span>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">
+        <div className="flex gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><p>Live market data is connected. Symbol filtering, 1H trend, 15M setup, 5M confirmation, grading, signals, and execution remain outside this task.</p></div>
       </div>
     </div>
   );
