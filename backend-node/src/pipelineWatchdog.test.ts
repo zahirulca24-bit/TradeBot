@@ -82,7 +82,7 @@ test('marks a successful scan degraded when Bybit Demo health is unavailable', a
   assert.ok(status.lastRun?.issues.includes('BYBIT_DEMO_UNAVAILABLE'));
 });
 
-test('skips an overlapping watchdog run', async () => {
+test('skips an overlapping watchdog run and reports degradation', async () => {
   let release!: (value: ReturnType<typeof snapshot>) => void;
   const pending = new Promise<ReturnType<typeof snapshot>>((resolve) => {
     release = resolve;
@@ -96,5 +96,7 @@ test('skips an overlapping watchdog run', async () => {
   assert.equal(watchdog.getStatus().skippedOverlaps, 1);
   release(snapshot());
   await first;
-  assert.equal(watchdog.getStatus().state, 'HEALTHY');
+  const status = watchdog.getStatus();
+  assert.equal(status.state, 'DEGRADED');
+  assert.ok(status.lastRun?.issues.includes('PREVIOUS_WATCHDOG_RUN_STILL_ACTIVE'));
 });
