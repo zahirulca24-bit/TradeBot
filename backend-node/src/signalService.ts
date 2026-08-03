@@ -1,5 +1,11 @@
 import type { FiveMinutePipelineService } from './fiveMinutePipeline.js';
-import { SignalStore, type SignalCandidateInput } from './signalStore.js';
+import {
+  registerSignalScannerWorker,
+  SignalScannerWorker,
+  type SignalScannerWorkerStatus,
+  type SignalWorkerPipelineCounts,
+} from './signalScannerWorker.js';
+import { SignalStore, type SignalCandidateInput, type SignalUpsertResult } from './signalStore.js';
 
 function requirePositive(value: number | null, code: string): number {
   if (value === null || !Number.isFinite(value) || value <= 0) throw new Error(code);
@@ -21,11 +27,80 @@ function requireKey(value: string | null): string {
   return value;
 }
 
+function booleanEnvironment(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  throw new Error(`INVALID_${name}`);
+}
+
+function integerEnvironment(
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const raw = process.env[name];
+  const value = raw === undefined || raw === '' ? fallback : Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`INVALID_${name}`);
+  }
+  return value;
+}
+
+export interface SignalScanPersistenceResult {
+  source: 'tradebot-pipeline';
+  generatedAt: string;
+  durationMs: number;
+  pipelineCounts: SignalWorkerPipelineCounts;
+  persistence: SignalUpsertResult;
+  storage: ReturnType<SignalStore['storageInfo']>;
+  crossCycleDuplicateProtection: 'UNIQUE_FINAL_SIGNAL_CANDIDATE_KEY';
+  signalPersistenceEnabled: true;
+  actionable: false;
+  executionEnabled: false;
+}
+
 export class SignalService {
+  private activeScan: Promise<SignalScanPersistenceResult> | null = null;
+  private readonly worker: SignalScannerWorker;
+
   public constructor(
     private readonly pipeline: FiveMinutePipelineService,
     private readonly store: SignalStore,
-  ) {}
+  ) {
+    this.worker = new SignalScannerWorker({
+      enabled: booleanEnvironment('SIGNAL_WORKER_ENABLED', true),
+      intervalMs: integerEnvironment(
+        'SIGNAL_WORKER_INTERVAL_MS',
+        15 * 60_000,
+        60_000,
+        3_600_000,
+      ),
+      initialDelayMs: integerEnvironment(
+        'SIGNAL_WORKER_INITIAL_DELAY_MS',
+        30_000,
+        0,
+        300_000,
+      ),
+      runTimeoutMs: integerEnvironment(
+        'SIGNAL_WORKER_RUN_TIMEOUT_MS',
+        13 * 60_000,
+        60_000,
+        840_000,
+      ),
+      runner: {
+        scanAndPersist: () => this.scanAndPersist(),
+      },
+    });
+    registerSignalScannerWorker(this.worker);
+    this.worker.start();
+  }
+
+  public getWorkerStatus(): SignalScannerWorkerStatus {
+    return this.worker.getStatus();
+  }
 
   public async list(limit: number) {
     const signals = await this.store.list(limit);
@@ -45,13 +120,26 @@ export class SignalService {
         executedCount: 0,
       },
       storage: this.store.storageInfo(),
+      worker: this.worker.getStatus(),
       signals,
       actionable: false,
       executionEnabled: false,
     } as const;
   }
 
-  public async scanAndPersist() {
+  public async scanAndPersist(): Promise<SignalScanPersistenceResult> {
+    if (this.activeScan) return this.activeScan;
+
+    const run = this.executeScanAndPersist();
+    this.activeScan = run;
+    try {
+      return await run;
+    } finally {
+      if (this.activeScan === run) this.activeScan = null;
+    }
+  }
+
+  private async executeScanAndPersist(): Promise<SignalScanPersistenceResult> {
     const pipeline = await this.pipeline.scanTopUniverseFiveMinute();
     const candidates: SignalCandidateInput[] = pipeline.finalCandidates.selected.map((candidate) => ({
       signalCandidateKey: requireKey(candidate.signalCandidateKey),
@@ -95,6 +183,6 @@ export class SignalService {
       signalPersistenceEnabled: true,
       actionable: false,
       executionEnabled: false,
-    } as const;
+    };
   }
 }
