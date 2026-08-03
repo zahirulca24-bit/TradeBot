@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { BybitDemoClient } from './bybitDemo.js';
 import { DashboardService } from './dashboard.js';
 import { BybitMarketDataClient } from './marketData.js';
+import { ScannerService } from './scanner.js';
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -45,6 +46,14 @@ const demoClient =
       })
     : null;
 const dashboard = new DashboardService(demoClient);
+const scanner =
+  parsedEnv.success && marketData
+    ? new ScannerService(
+        marketData,
+        parsedEnv.data.PYTHON_ENGINE_URL,
+        parsedEnv.data.INTERNAL_SERVICE_TOKEN,
+      )
+    : null;
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
@@ -61,6 +70,17 @@ function marketFailure(response: express.Response, error: unknown) {
     error: {
       code,
       message: 'Market data is not safe for actionable use.',
+      actionable: false,
+    },
+  });
+}
+
+function scannerFailure(response: express.Response, error: unknown) {
+  const code = error instanceof Error ? error.message : 'SCANNER_FAILURE';
+  return response.status(503).json({
+    error: {
+      code,
+      message: 'Scanner analysis is unavailable.',
       actionable: false,
     },
   });
@@ -282,6 +302,22 @@ app.get('/api/market/freshness/:symbol', async (request, response) => {
     return response.status(200).json(await marketData.getFreshnessSnapshot(symbol));
   } catch (error) {
     return marketFailure(response, error);
+  }
+});
+
+app.get('/api/scanner/trend/:symbol', async (request, response) => {
+  if (!scanner) return scannerFailure(response, new Error('INVALID_ENVIRONMENT'));
+  const symbol = request.params.symbol?.toUpperCase();
+  if (!symbol || !/^[A-Z0-9]{3,30}$/.test(symbol)) {
+    return response.status(400).json({
+      error: { code: 'INVALID_SYMBOL', message: 'Invalid scanner symbol.', actionable: false },
+    });
+  }
+
+  try {
+    return response.status(200).json(await scanner.analyzeOneHourTrend(symbol));
+  } catch (error) {
+    return scannerFailure(response, error);
   }
 });
 
