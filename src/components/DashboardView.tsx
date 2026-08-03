@@ -16,7 +16,7 @@ import {
 
 interface DashboardViewProps {
   apiBaseUrl: string;
-  onStartEngineClick: () => void;
+  onStartEngineClick: (message?: string) => void;
 }
 
 type EngineStatus = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'BLOCKED';
@@ -56,6 +56,9 @@ interface DashboardSummary {
 
 interface SystemHealth {
   ready: boolean;
+  reason?: string | null;
+  pythonEngineReason?: string | null;
+  pythonEngineAttempts?: number;
   tradingMode: string;
   executionEnabled: false;
   dependencies: {
@@ -66,7 +69,7 @@ interface SystemHealth {
   clockSkewMs?: number;
 }
 
-const REQUEST_TIMEOUT_MS = 15000;
+const REQUEST_TIMEOUT_MS = 50000;
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -74,12 +77,35 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { accept: 'application/json', ...(init?.headers ?? {}) },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  const body = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | T | null;
-  if (!response.ok) {
-    const errorBody = body as { error?: { code?: string; message?: string } } | null;
-    throw new Error(errorBody?.error?.code || errorBody?.error?.message || `HTTP_${response.status}`);
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(`NON_JSON_RESPONSE_HTTP_${response.status}`);
   }
+
+  const body = await response.json().catch(() => null) as
+    | { error?: { code?: string; message?: string }; reason?: string; pythonEngineReason?: string }
+    | T
+    | null;
+  if (!response.ok) {
+    const errorBody = body as {
+      error?: { code?: string; message?: string };
+      reason?: string;
+      pythonEngineReason?: string;
+    } | null;
+    throw new Error(
+      errorBody?.error?.code ||
+        errorBody?.reason ||
+        errorBody?.pythonEngineReason ||
+        errorBody?.error?.message ||
+        `HTTP_${response.status}`,
+    );
+  }
+  if (body === null) throw new Error('INVALID_JSON_RESPONSE');
   return body as T;
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function MetricCard({ title, value, suffix, icon: Icon, connected }: {
@@ -111,30 +137,46 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
   const [health, setHealth] = React.useState<SystemHealth | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [actionPending, setActionPending] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  const [summaryError, setSummaryError] = React.useState<string | null>(null);
+  const [healthError, setHealthError] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
 
   const loadDashboard = React.useCallback(async () => {
     if (!apiBaseUrl) {
-      setError('VITE_API_BASE_URL_NOT_CONFIGURED');
+      setSummaryError('VITE_API_BASE_URL_NOT_CONFIGURED');
+      setHealthError('VITE_API_BASE_URL_NOT_CONFIGURED');
       setLoading(false);
       return;
     }
+
     setLoading(true);
-    setError(null);
-    try {
-      const [summaryResult, healthResult] = await Promise.all([
-        requestJson<DashboardSummary>(`${apiBaseUrl}/api/dashboard/summary`),
-        requestJson<SystemHealth>(`${apiBaseUrl}/api/dashboard/system-health`),
-      ]);
-      setSummary(summaryResult);
-      setHealth(healthResult);
-    } catch (loadError) {
-      setSummary(null);
-      setHealth(null);
-      setError(loadError instanceof Error ? loadError.message : 'DASHBOARD_LOAD_FAILED');
-    } finally {
-      setLoading(false);
-    }
+    setSummaryError(null);
+    setHealthError(null);
+
+    const summaryTask = requestJson<DashboardSummary>(`${apiBaseUrl}/api/dashboard/summary`)
+      .then((result) => {
+        setSummary(result);
+        return result;
+      })
+      .catch((error) => {
+        setSummary(null);
+        setSummaryError(errorMessage(error, 'DASHBOARD_SUMMARY_LOAD_FAILED'));
+        throw error;
+      });
+
+    const healthTask = requestJson<SystemHealth>(`${apiBaseUrl}/api/dashboard/system-health`)
+      .then((result) => {
+        setHealth(result);
+        return result;
+      })
+      .catch((error) => {
+        setHealth(null);
+        setHealthError(errorMessage(error, 'SYSTEM_HEALTH_LOAD_FAILED'));
+        throw error;
+      });
+
+    await Promise.allSettled([summaryTask, healthTask]);
+    setLoading(false);
   }, [apiBaseUrl]);
 
   React.useEffect(() => {
@@ -143,16 +185,18 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
 
   const changeEngineState = async (action: 'start' | 'stop') => {
     if (!apiBaseUrl) {
-      onStartEngineClick();
+      onStartEngineClick('VITE_API_BASE_URL is not configured.');
       return;
     }
     setActionPending(true);
-    setError(null);
+    setActionError(null);
     try {
       await requestJson(`${apiBaseUrl}/api/dashboard/engine/${action}`, { method: 'POST' });
       await loadDashboard();
-    } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : 'ENGINE_ACTION_FAILED');
+    } catch (error) {
+      const message = errorMessage(error, 'ENGINE_ACTION_FAILED');
+      setActionError(message);
+      onStartEngineClick(message);
     } finally {
       setActionPending(false);
     }
@@ -179,9 +223,19 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
         </button>
       </div>
 
-      {error && (
+      {summaryError && (
         <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
-          Dashboard unavailable: <span className="font-mono">{error}</span>. No fallback data is shown.
+          Dashboard summary unavailable: <span className="font-mono">{summaryError}</span>. No fallback data is shown.
+        </div>
+      )}
+      {healthError && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+          System health is temporarily unavailable: <span className="font-mono">{healthError}</span>. Live account summary remains visible when available.
+        </div>
+      )}
+      {actionError && (
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
+          Engine action blocked: <span className="font-mono">{actionError}</span>
         </div>
       )}
 
@@ -196,7 +250,7 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
             <span className="text-xs font-semibold text-slate-400">Engine Status</span>
             <div className="rounded-md bg-dark-bg p-1.5 text-slate-400"><Power className="h-4 w-4" /></div>
           </div>
-          <div className="mt-3"><span className={`text-base font-bold uppercase ${statusTone}`}>{loading ? 'LOADING' : engineStatus}</span></div>
+          <div className="mt-3"><span className={`text-base font-bold uppercase ${statusTone}`}>{loading && !summary ? 'LOADING' : engineStatus}</span></div>
           <div className="mt-2.5 text-[10px] text-slate-400">Execution remains disabled</div>
         </div>
       </div>
@@ -242,7 +296,7 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
             <div className="flex items-center gap-2 border-b border-trading-border/80 pb-4"><ShieldCheck className="h-4 w-4 text-brand-bybit" /><h3 className="text-sm font-semibold text-slate-100">System Health</h3></div>
             <div className="mt-4 space-y-3">
               {[
-                ['Host Connection', Boolean(health), Link],
+                ['Host Connection', Boolean(summary), Link],
                 ['Market Data', health?.dependencies.marketData ?? false, Database],
                 ['Python Engine', health?.dependencies.pythonEngine ?? false, Cpu],
                 ['Bybit Demo', health?.dependencies.bybitDemo ?? false, Wallet],
@@ -252,6 +306,7 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
               })}
             </div>
             <p className="mt-4 border-t border-trading-border/80 pt-3 text-center text-[11px] text-slate-500">Clock skew: {health?.clockSkewMs ?? '—'} ms</p>
+            {health?.pythonEngineReason && <p className="mt-2 text-center font-mono text-[10px] text-amber-300">{health.pythonEngineReason}</p>}
           </div>
 
           <div className="rounded-xl border border-trading-border bg-card-bg p-5 shadow-sm">
