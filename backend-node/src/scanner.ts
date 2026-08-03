@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import type { BybitMarketDataClient } from './marketData.js';
+import { postScannerJsonWithRetry } from './scannerRetry.js';
+
+const PYTHON_SCANNER_TIMEOUT_MS = 2000;
+const PYTHON_SCANNER_ATTEMPTS = 3;
 
 const trendEngineResponseSchema = z.object({
   engine: z.literal('tradebot-python'),
@@ -20,14 +24,6 @@ const trendEngineResponseSchema = z.object({
   actionable: z.literal(false),
 });
 
-const engineErrorSchema = z.object({
-  detail: z
-    .object({
-      code: z.string().optional(),
-    })
-    .optional(),
-});
-
 export class ScannerService {
   public constructor(
     private readonly marketData: BybitMarketDataClient,
@@ -39,34 +35,25 @@ export class ScannerService {
     const requestedSymbol = symbol.toUpperCase();
     const candles = await this.marketData.getClosedCandles(requestedSymbol, '60', 250);
 
-    const response = await fetch(`${this.pythonEngineUrl}/analysis/trend`, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/json',
-        'x-internal-service-token': this.internalServiceToken,
-      },
-      body: JSON.stringify({ symbol: requestedSymbol, candles }),
-      signal: AbortSignal.timeout(5000),
+    const result = await postScannerJsonWithRetry({
+      url: `${this.pythonEngineUrl}/analysis/trend`,
+      internalServiceToken: this.internalServiceToken,
+      body: { symbol: requestedSymbol, candles },
+      timeoutMs: PYTHON_SCANNER_TIMEOUT_MS,
+      attempts: PYTHON_SCANNER_ATTEMPTS,
     });
 
-    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-    if (!contentType.includes('application/json')) throw new Error('PYTHON_ENGINE_INVALID_RESPONSE');
-
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new Error('PYTHON_ENGINE_INVALID_JSON');
+    const parsed = trendEngineResponseSchema.safeParse(result.payload);
+    if (!parsed.success) {
+      console.warn('Python scanner response contract mismatch', {
+        symbol: requestedSymbol,
+        attempts: result.attempts,
+        issues: parsed.error.issues.map((issue) => issue.path.join('.')),
+      });
+      throw new Error('PYTHON_ENGINE_CONTRACT_MISMATCH');
     }
 
-    if (!response.ok) {
-      const errorPayload = engineErrorSchema.safeParse(payload);
-      const code = errorPayload.success ? errorPayload.data.detail?.code : undefined;
-      throw new Error(code || `PYTHON_ENGINE_HTTP_${response.status}`);
-    }
-
-    const analysis = trendEngineResponseSchema.parse(payload);
+    const analysis = parsed.data;
     if (analysis.symbol !== requestedSymbol) throw new Error('SCANNER_SYMBOL_MISMATCH');
 
     return {

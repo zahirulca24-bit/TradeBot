@@ -69,7 +69,23 @@ interface SystemHealth {
   clockSkewMs?: number;
 }
 
+interface ErrorEnvelope {
+  error?: { code?: string; message?: string };
+  reason?: string;
+  pythonEngineReason?: string;
+}
+
 const REQUEST_TIMEOUT_MS = 50000;
+
+function responseError(body: ErrorEnvelope | null, status: number) {
+  return new Error(
+    body?.error?.code ||
+      body?.reason ||
+      body?.pythonEngineReason ||
+      body?.error?.message ||
+      `HTTP_${status}`,
+  );
+}
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -82,26 +98,38 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(`NON_JSON_RESPONSE_HTTP_${response.status}`);
   }
 
-  const body = await response.json().catch(() => null) as
-    | { error?: { code?: string; message?: string }; reason?: string; pythonEngineReason?: string }
-    | T
-    | null;
-  if (!response.ok) {
-    const errorBody = body as {
-      error?: { code?: string; message?: string };
-      reason?: string;
-      pythonEngineReason?: string;
-    } | null;
-    throw new Error(
-      errorBody?.error?.code ||
-        errorBody?.reason ||
-        errorBody?.pythonEngineReason ||
-        errorBody?.error?.message ||
-        `HTTP_${response.status}`,
-    );
-  }
+  const body = (await response.json().catch(() => null)) as ErrorEnvelope | T | null;
+  if (!response.ok) throw responseError(body as ErrorEnvelope | null, response.status);
   if (body === null) throw new Error('INVALID_JSON_RESPONSE');
   return body as T;
+}
+
+async function requestSystemHealth(url: string): Promise<SystemHealth> {
+  const response = await fetch(url, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(`NON_JSON_RESPONSE_HTTP_${response.status}`);
+  }
+
+  const body = (await response.json().catch(() => null)) as SystemHealth | ErrorEnvelope | null;
+  if (body === null) throw new Error('INVALID_JSON_RESPONSE');
+
+  const candidate = body as Partial<SystemHealth>;
+  if (
+    typeof candidate.ready === 'boolean' &&
+    candidate.dependencies !== undefined &&
+    typeof candidate.dependencies.marketData === 'boolean' &&
+    typeof candidate.dependencies.pythonEngine === 'boolean' &&
+    typeof candidate.dependencies.bybitDemo === 'boolean'
+  ) {
+    return body as SystemHealth;
+  }
+
+  if (!response.ok) throw responseError(body as ErrorEnvelope, response.status);
+  throw new Error('INVALID_SYSTEM_HEALTH_RESPONSE');
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -164,7 +192,7 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
         throw error;
       });
 
-    const healthTask = requestJson<SystemHealth>(`${apiBaseUrl}/api/dashboard/system-health`)
+    const healthTask = requestSystemHealth(`${apiBaseUrl}/api/dashboard/system-health`)
       .then((result) => {
         setHealth(result);
         return result;
@@ -233,6 +261,11 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
           System health is temporarily unavailable: <span className="font-mono">{healthError}</span>. Live account summary remains visible when available.
         </div>
       )}
+      {health && !health.ready && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+          System health is degraded: <span className="font-mono">{health.pythonEngineReason || health.reason || 'DEPENDENCY_NOT_READY'}</span>. Available dependencies remain visible below.
+        </div>
+      )}
       {actionError && (
         <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
           Engine action blocked: <span className="font-mono">{actionError}</span>
@@ -299,7 +332,7 @@ export default function DashboardView({ apiBaseUrl, onStartEngineClick }: Dashbo
                 ['Host Connection', Boolean(summary), Link],
                 ['Market Data', health?.dependencies.marketData ?? false, Database],
                 ['Python Engine', health?.dependencies.pythonEngine ?? false, Cpu],
-                ['Bybit Demo', health?.dependencies.bybitDemo ?? false, Wallet],
+                ['Bybit Demo', health?.dependencies.bybitDemo ?? connected, Wallet],
               ].map(([label, ok, Icon]) => {
                 const StatusIcon = Icon as React.ComponentType<{ className?: string }>;
                 return <div key={String(label)} className="flex items-center justify-between rounded-lg border border-trading-border bg-dark-bg/40 p-3"><div className="flex items-center gap-2"><StatusIcon className="h-4 w-4 text-slate-500" /><span className="text-xs font-semibold text-slate-300">{String(label)}</span></div><span className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>{ok ? 'ONLINE' : 'OFFLINE'}</span></div>;
