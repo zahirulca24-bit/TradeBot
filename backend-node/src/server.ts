@@ -8,6 +8,8 @@ import { FiveMinutePipelineService } from './fiveMinutePipeline.js';
 import { BybitMarketDataClient } from './marketData.js';
 import { checkPythonEngineReady } from './pythonEngine.js';
 import { ScannerService } from './scanner.js';
+import { SignalService } from './signalService.js';
+import { SignalStore } from './signalStore.js';
 import { UniverseSelector } from './universe.js';
 
 const envSchema = z.object({
@@ -28,6 +30,7 @@ const envSchema = z.object({
   BYBIT_DEMO_API_SECRET: z.string().min(8).optional().or(z.literal('')),
   BYBIT_DEMO_RECV_WINDOW: z.coerce.number().int().min(1000).max(10000).default(5000),
   BYBIT_DEMO_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(10000).default(5000),
+  SIGNAL_STORE_PATH: z.string().min(1).default('./data/signals.json'),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
@@ -77,6 +80,9 @@ const fiveMinutePipeline =
         scanner,
       )
     : null;
+const signalStore = parsedEnv.success ? new SignalStore(parsedEnv.data.SIGNAL_STORE_PATH) : null;
+const signalService =
+  fiveMinutePipeline && signalStore ? new SignalService(fiveMinutePipeline, signalStore) : null;
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
@@ -98,6 +104,17 @@ function scannerFailure(response: express.Response, error: unknown) {
   const code = error instanceof Error ? error.message : 'SCANNER_FAILURE';
   return response.status(503).json({
     error: { code, message: 'Scanner analysis is unavailable.', actionable: false },
+  });
+}
+
+function signalFailure(response: express.Response, error: unknown) {
+  const code = error instanceof Error ? error.message : 'SIGNAL_STORE_FAILURE';
+  return response.status(503).json({
+    error: {
+      code,
+      message: 'Signal persistence is unavailable. No signal was fabricated or executed.',
+      actionable: false,
+    },
   });
 }
 
@@ -128,6 +145,7 @@ app.get('/health', (_request, response) => {
     executionEnabled: false,
     marketDataConfigured: marketData !== null,
     bybitDemoConfigured: demoClient !== null,
+    signalStoreConfigured: signalStore !== null,
   });
 });
 
@@ -160,6 +178,7 @@ app.get('/ready', async (_request, response) => {
       executionEnabled: false,
       marketData: { source: 'bybit-v5-public', clockSkewMs: clock.skewMs },
       dashboard: { demoAccountConfigured: demoClient !== null },
+      signalStore: { configured: signalStore !== null },
     });
   } catch (error) {
     return response.status(503).json({
@@ -185,7 +204,7 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
       reason: 'INVALID_ENVIRONMENT',
       tradingMode: 'unconfigured',
       executionEnabled: false,
-      dependencies: { marketData: false, pythonEngine: false, bybitDemo: false },
+      dependencies: { marketData: false, pythonEngine: false, bybitDemo: false, signalStore: false },
     });
   }
 
@@ -203,6 +222,7 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
         marketData: true,
         pythonEngine: ready,
         bybitDemo: demoClient !== null,
+        signalStore: signalStore !== null,
       },
       clockSkewMs: clock.skewMs,
     });
@@ -216,6 +236,7 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
         marketData: false,
         pythonEngine: false,
         bybitDemo: demoClient !== null,
+        signalStore: signalStore !== null,
       },
     });
   }
@@ -325,6 +346,31 @@ app.get('/api/market/freshness/:symbol', async (request, response) => {
     return response.status(200).json(await marketData.getFreshnessSnapshot(symbol));
   } catch (error) {
     return marketFailure(response, error);
+  }
+});
+
+app.get('/api/signals', async (request, response) => {
+  if (!signalService) return signalFailure(response, new Error('INVALID_ENVIRONMENT'));
+  const limit = z.coerce.number().int().min(1).max(500).default(100).safeParse(request.query.limit ?? 100);
+  if (!limit.success) {
+    return response.status(400).json({
+      error: { code: 'INVALID_SIGNAL_LIST_LIMIT', message: 'Signal limit must be between 1 and 500.' },
+    });
+  }
+
+  try {
+    return response.status(200).json(await signalService.list(limit.data));
+  } catch (error) {
+    return signalFailure(response, error);
+  }
+});
+
+app.post('/api/signals/scan', async (_request, response) => {
+  if (!signalService) return signalFailure(response, new Error('INVALID_ENVIRONMENT'));
+  try {
+    return response.status(200).json(await signalService.scanAndPersist());
+  } catch (error) {
+    return signalFailure(response, error);
   }
 });
 
