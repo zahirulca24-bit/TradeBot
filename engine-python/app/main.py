@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .entry import EntryCandle, EntryDirection, analyze_five_minute_entry
 from .setup import SetupCandle, SetupDirection, analyze_fifteen_minute_setup
 from .trend import TrendCandle, analyze_one_hour_trend
 
@@ -57,7 +58,26 @@ class SetupAnalysisRequest(BaseModel):
     candles: list[SetupCandleRequest] = Field(min_length=40, max_length=500)
 
 
-app = FastAPI(title="TradeBot Python Strategy Engine", version="0.3.0")
+class EntryCandleRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    interval: str = Field(pattern=r"^5$")
+    startTimeMs: int = Field(gt=0)
+    closeTimeMs: int = Field(gt=0)
+    open: float = Field(gt=0)
+    high: float = Field(gt=0)
+    low: float = Field(gt=0)
+    close: float = Field(gt=0)
+    volume: float = Field(gt=0)
+    turnover: float = Field(gt=0)
+
+
+class EntryAnalysisRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    direction: EntryDirection
+    candles: list[EntryCandleRequest] = Field(min_length=21, max_length=500)
+
+
+app = FastAPI(title="TradeBot Python Strategy Engine", version="0.4.0")
 
 
 def load_settings() -> Settings | None:
@@ -94,6 +114,14 @@ def require_internal_service(
     return settings
 
 
+def scanner_capabilities() -> list[str]:
+    return [
+        "ONE_HOUR_EMA_TREND",
+        "FIFTEEN_MINUTE_BREAKOUT_RETEST",
+        "FIVE_MINUTE_LIQUIDITY_SWEEP_VOLUME_ENTRY",
+    ]
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     configured = load_settings() is not None
@@ -102,7 +130,7 @@ def health() -> dict[str, object]:
         "status": "healthy" if configured else "degraded",
         "tradingMode": "bybit_demo" if configured else "unconfigured",
         "executionAuthority": False,
-        "scannerCapabilities": ["ONE_HOUR_EMA_TREND", "FIFTEEN_MINUTE_BREAKOUT_RETEST"],
+        "scannerCapabilities": scanner_capabilities(),
     }
 
 
@@ -116,7 +144,7 @@ def ready(
         "ready": True,
         "tradingMode": "bybit_demo",
         "executionAuthority": False,
-        "scannerCapabilities": ["ONE_HOUR_EMA_TREND", "FIFTEEN_MINUTE_BREAKOUT_RETEST"],
+        "scannerCapabilities": scanner_capabilities(),
     }
 
 
@@ -234,6 +262,73 @@ def analyze_setup(
             "breakoutLookbackCandles": 20,
             "retestWindowMinCandles": 1,
             "retestWindowMaxCandles": 5,
+        },
+        "candleCount": analysis.candle_count,
+        "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,
+        "reasons": list(analysis.reasons),
+        "actionable": False,
+    }
+
+
+@app.post("/analysis/entry")
+def analyze_entry(
+    request: EntryAnalysisRequest,
+    x_internal_service_token: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    require_internal_service(x_internal_service_token)
+
+    if any(candle.symbol != request.symbol for candle in request.candles):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "CANDLE_SYMBOL_MISMATCH"},
+        )
+
+    try:
+        analysis = analyze_five_minute_entry(
+            [
+                EntryCandle(
+                    symbol=candle.symbol,
+                    interval=candle.interval,
+                    start_time_ms=candle.startTimeMs,
+                    close_time_ms=candle.closeTimeMs,
+                    open=candle.open,
+                    high=candle.high,
+                    low=candle.low,
+                    close=candle.close,
+                    volume=candle.volume,
+                    turnover=candle.turnover,
+                )
+                for candle in request.candles
+            ],
+            request.direction,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": str(error)},
+        ) from error
+
+    return {
+        "engine": "tradebot-python",
+        "strategyStage": "FIVE_MINUTE_ENTRY",
+        "symbol": analysis.symbol,
+        "interval": analysis.interval,
+        "direction": analysis.direction.value,
+        "passed": analysis.passed,
+        "indicators": {
+            "latestClose": analysis.latest_close,
+            "sweepLevel": analysis.sweep_level,
+            "averageVolume20": analysis.average_volume20,
+            "latestVolume": analysis.latest_volume,
+            "volumeRatio": analysis.volume_ratio,
+            "sweepDepthBps": analysis.sweep_depth_bps,
+        },
+        "entry": {
+            "entryCandleCloseTimeMs": analysis.entry_candle_close_time_ms,
+            "entryKey": analysis.entry_key,
+            "sweepLookbackCandles": 20,
+            "volumeLookbackCandles": 20,
+            "volumeMultiplier": 1.5,
         },
         "candleCount": analysis.candle_count,
         "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,
