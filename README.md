@@ -1,168 +1,28 @@
 # TradeBot — Bybit Intraday Demo Trading Platform
 
-TradeBot is a Bybit Demo-only intraday trading platform built with a React frontend and a hybrid Node.js + Python backend architecture.
+**Status Date:** 04 August 2026  
+**Day:** Tuesday  
+**Environment:** Bybit Demo only  
+**Execution:** Disabled
 
-## Current Status
+TradeBot is a React + Node.js + Python intraday signal platform for Bybit Demo. The current production system performs closed-candle market scanning, final risk validation, Supabase signal persistence, scheduled signal automation, and pipeline supervision. It does not place orders.
 
-- Frontend: deployed on Render and configured with the Node backend URL
+## Production Status
+
+- Frontend: deployed on Render
 - Node.js backend: deployed and healthy on Render
 - Python strategy engine: deployed and healthy on Render
-- Phase 1 — Hybrid Backend Foundation: completed
-- Phase 1.5 — Market Data Collection & Freshness Foundation: completed
-- Phase 2 — Dashboard Backend: completed
-- Current backend progress: 45%
-- Exchange mode: Bybit Demo only
-- Testnet: disabled
+- Supabase PostgreSQL: connected and verified
+- Automated Signal Scanner Worker: healthy
+- Pipeline Watchdog: healthy
+- Market data: Bybit V5 public API
+- Bybit Demo account connection: online
 - Real trading: disabled
-- Mock, seeded, sample, cached-fallback, or fabricated trading data: prohibited
-- Execution: disabled until the dedicated execution phases are implemented and approved
+- Testnet: disabled
+- Order execution: disabled
+- Mock, fabricated, seeded, or unsafe fallback trading data: prohibited
 
-The Dashboard backend now returns real Bybit Demo account metrics. The current frontend Dashboard is still a static disconnected view and must be integrated with the completed Dashboard endpoints before Phase 3 begins.
-
-## Frontend Navigation
-
-1. Dashboard
-2. Market Scanner
-3. Signals
-4. Active Trades
-5. Performance Analysis
-6. Settings
-
-Settings contains exactly five tabs:
-
-1. Trading Setup
-2. Bybit API
-3. Notifications
-4. Diagnostics
-5. Decision Log
-
-## Hybrid Backend Architecture
-
-### Node.js Service — API Gateway and Final Authority
-
-The Node.js service owns or will own:
-
-- frontend API endpoints
-- authentication and control-token validation
-- engine start and stop orchestration
-- WebSocket and live status delivery
-- Bybit Demo API integration
-- final risk approval
-- order execution and trade lifecycle
-- active-trade management
-- manual execute and manual close operations
-- notification dispatch
-- request validation
-- database writes and audit records
-- communication with the Python strategy service
-
-Node.js is the final authority for risk, execution, exchange confirmation, trade state, and persistent records.
-
-### Python Service — Strategy and Analytics Engine
-
-The Python service owns or will own:
-
-- market-data processing
-- technical-indicator calculation
-- 1H trend detection
-- 15M setup validation
-- 5M entry confirmation
-- deterministic signal scoring and grading
-- entry, stop-loss, and take-profit proposals
-- risk-reward validation
-- position-size proposals
-- rejection and decision reasons
-- performance analytics
-- future backtesting support
-
-Python must never place or close exchange orders directly.
-
-## Authority Flow
-
-```text
-Bybit market data
-        ↓
-Node.js collection and validation
-        ↓
-Python strategy analysis
-        ↓
-Node.js response validation
-        ↓
-Node.js final risk approval
-        ↓
-Bybit Demo execution
-        ↓
-Database and audit log
-        ↓
-Frontend
-```
-
-The frontend must call only the Node.js API. It must never call the Python service or Bybit directly.
-
-## Completed Foundation
-
-### Phase 1 — Hybrid Foundation ✅
-
-- Node.js API service scaffold
-- Python FastAPI strategy-service scaffold
-- shared contracts
-- health and readiness endpoints
-- internal service authentication
-- environment validation
-- separated frontend and backend CI validation
-- Bybit Demo-only safety lock
-- fail-closed readiness
-
-### Phase 1.5 — Market Data Collection & Freshness Foundation ✅
-
-- Bybit V5 public market-data client in Node.js
-- Bybit server-time collection
-- trading USDT linear perpetual symbol discovery
-- ticker collection
-- 5M, 15M, and 1H kline collection
-- closed-candle-only filtering
-- open candle exclusion
-- clock-skew validation
-- stale and future-dated candle rejection
-- OHLC range validation
-- positive price, volume, and turnover validation
-- fail-closed market-data errors
-- market-data readiness integration
-
-Available market-data endpoints:
-
-```text
-GET /api/market/symbols
-GET /api/market/tickers?symbol=BTCUSDT
-GET /api/market/candles/:symbol/:interval
-GET /api/market/freshness/:symbol
-```
-
-Supported candle intervals are `5`, `15`, and `60`.
-
-### Phase 2 — Dashboard Backend ✅
-
-- Bybit Demo wallet balance and total equity
-- available balance and unrealised P&L
-- open positions
-- daily realised P&L
-- daily trade count, wins, losses, and win rate
-- engine status and recent activity state
-- system-health endpoint
-- fail-closed start and stop controls
-- safe handling of HTML, malformed JSON, and invalid Bybit API responses
-- no secret, signature, or upstream response-body logging
-
-Available Dashboard endpoints:
-
-```text
-GET  /api/dashboard/summary
-GET  /api/dashboard/system-health
-POST /api/dashboard/engine/start
-POST /api/dashboard/engine/stop
-```
-
-## Deployment Status
+## Live Deployment
 
 ```text
 Frontend
@@ -175,142 +35,348 @@ Python Strategy Engine
 https://tradebot-python-engine.onrender.com
 ```
 
-Validated runtime status:
-
-- Node `/health`: healthy
-- Node `/ready`: ready
-- Python `/health`: healthy
-- Bybit Demo account: configured
-- Bybit V5 public market data: configured
-- execution authority: disabled
-
-## Safety Rules
-
-- Bybit Demo only for all authenticated trading operations
-- official Bybit public market-data source only
-- no Testnet mode
-- no real-trading mode
-- no mock fallback in any trading path
-- only validated closed candles are actionable
-- stale, future-dated, incomplete, invalid, or unreachable market data blocks action
-- Python unavailable or invalid response blocks execution
-- Node.js performs final risk validation
-- exchange response, fill status, and protection state must be confirmed before a trade becomes active
-- API keys and secrets remain in backend environment variables only
-- frontend must not store Bybit or Telegram secrets
-- operational actions require backend confirmation
-- all material decisions and failures must be auditable
-
-## Locked Risk Defaults
-
-- Risk per trade: `0.5%`
-- Minimum risk-reward ratio: `1:2`
-- Daily loss limit: `2%`
-- Maximum active trades: `5`
-
-## Page-by-Page Backend Roadmap
-
-### Phase 2.1 — Dashboard Frontend Integration
-
-- fetch real Dashboard summary data
-- fetch real system-health data
-- render Demo balance, P&L, trades, win rate, and engine status
-- connect Start Engine and Stop Engine controls to the Node API
-- add loading, retry, timeout, and safe disconnected states
-- handle Render free-tier cold starts
-- keep execution disabled
-- use no mock data
-
-### Phase 3 — Market Scanner
+Important runtime endpoints:
 
 ```text
-Market Data
-→ Symbol Filter
-→ 1H Trend
-→ 15M Setup
-→ 5M Confirmation
-→ Final Result
+GET https://tradebot-node-backend.onrender.com/health
+GET https://tradebot-node-backend.onrender.com/ready
+GET https://tradebot-node-backend.onrender.com/api/signals
+GET https://tradebot-node-backend.onrender.com/api/watchdog/status
+GET https://tradebot-node-backend.onrender.com/api/signal-worker/status
+GET https://tradebot-python-engine.onrender.com/health
 ```
 
-Every symbol must retain stage-level pass, rejection, status, and reason data.
+## Current Architecture
 
-### Phase 4 — Signals
+```text
+React Frontend
+      ↓
+Node.js API, Pipeline Orchestration, Signal Worker, Watchdog
+      ↓
+Python Strategy Engine
+      ↓
+Supabase PostgreSQL
+```
 
-- approved signals
-- direction
-- strategy
-- grade
-- entry
-- stop-loss
-- take-profit
-- risk-reward
-- expiry
-- status
-- Execute Demo action
+### Node.js Backend
 
-### Phase 5 — Active Trades
+The Node service is the final application authority for:
 
-- open positions
-- current price
-- unrealized P&L
-- stop-loss and take-profit
-- duration
-- refresh
-- idempotent manual close
-- exchange-state reconciliation
+- frontend API endpoints
+- Bybit market-data collection and validation
+- pipeline orchestration
+- final risk validation
+- Supabase signal persistence
+- cross-cycle duplicate protection
+- scheduled signal scanning
+- watchdog supervision
+- system-health and readiness reporting
+- future execution authority
 
-### Phase 6 — Performance Analysis
+### Python Strategy Engine
 
-- Net P&L
-- Total Trades
-- Win Rate
-- Profit Factor
-- Average R
-- Max Drawdown
-- Daily and Weekly P&L
-- Win and Loss analysis
-- Long and Short performance
-- Exit-reason analysis
-- Symbol performance
+The Python service performs deterministic analysis only:
 
-No equity curve is required in the approved frontend scope.
+- 1H EMA trend validation
+- 15M breakout and delayed retest validation
+- 5M liquidity sweep and volume entry confirmation
+- 15M swing stop-loss validation
+- minimum 1:2 risk-reward validation
+- rejection reasons and evidence
 
-### Phase 7 — Settings
+Python does not place or close orders.
 
-Backend-controlled settings and diagnostics for:
+### Supabase PostgreSQL
 
-- Trading Setup
-- Bybit API
-- Notifications
-- Diagnostics
-- Decision Log
+Supabase is the persistent database for approved final signal candidates.
+
+Implemented database controls:
+
+- table: `public.trade_signals`
+- unique key: `signal_candidate_key`
+- atomic duplicate handling through RPC
+- duplicate sightings increment `seen_count`
+- `last_seen_at` update
+- RLS enabled
+- frontend, anon, and authenticated direct access blocked
+- server-side secret access only
+- execution and actionable flags locked to false
+
+Render local filesystem and Render PostgreSQL are not required for signal persistence.
+
+## Locked Scanner Pipeline
+
+```text
+Top 50 Liquid USDT Perpetuals
+        ↓
+1H EMA Trend Filter — maximum 20
+        ↓
+15M Breakout + Delayed Retest — maximum 10
+        ↓
+5M Liquidity Sweep + Volume Entry — maximum 3
+        ↓
+15M Swing Stop-Loss + Minimum R:R 1:2
+        ↓
+Final Signal Candidate
+        ↓
+Supabase Persistence
+```
+
+The limits are maximum caps, not quotas. The pipeline never fabricates or pads results.
+
+Example valid cycle:
+
+```text
+50 → 18 → 1 → 0 → 0
+```
+
+Zero final candidates is a valid healthy result when the strategy conditions are not met.
+
+## Strategy Rules
+
+### 1H Trend
+
+- LONG: `EMA20 > EMA50 > EMA200`
+- SHORT: `EMA20 < EMA50 < EMA200`
+- otherwise: neutral or rejected
+- closed 1H candles only
+
+### 15M Setup
+
+LONG:
+
+- upstream 1H direction is LONG
+- close breaks above the previous 20 closed-candle high
+- retest occurs within the next 1–5 closed candles
+- retest touches or crosses the breakout level and closes back above
+- RSI14 is above 50
+
+SHORT uses the symmetrical rules below the previous 20-candle low with RSI14 below 50.
+
+### 5M Entry
+
+LONG:
+
+- upstream 1H and 15M stages passed LONG
+- low sweeps the previous 20 closed-candle low
+- candle closes back above the swept level
+- volume exceeds the previous 20-candle average by at least 1.5x
+
+SHORT uses the symmetrical rejection rule above the previous 20-candle high.
+
+### Final Risk Validation
+
+- latest confirmed 15M swing used as stop-loss reference
+- LONG stop-loss must be below entry
+- SHORT stop-loss must be above entry
+- minimum risk-reward ratio: `1:2`
+- closed candles only
+- duplicate same-candle signal blocked
+
+## Automated Signal Scanner Worker
+
+The signal worker runs every 15 minutes:
+
+```text
+Full Pipeline
+→ Final Candidate Validation
+→ Supabase Insert or Duplicate Update
+```
+
+Worker controls:
+
+- scheduled interval: 15 minutes
+- startup delay supported
+- overlap lock
+- duplicate scheduled-cycle protection
+- manual and scheduled scans share one in-flight run
+- zero-candidate cycles remain healthy
+- inserts only final risk-approved candidates
+- execution remains disabled
+
+Runtime environment:
+
+```env
+SIGNAL_WORKER_ENABLED=true
+SIGNAL_WORKER_INTERVAL_MS=900000
+SIGNAL_WORKER_INITIAL_DELAY_MS=30000
+SIGNAL_WORKER_RUN_TIMEOUT_MS=780000
+```
+
+## Pipeline Watchdog
+
+The watchdog supervises the worker and dependencies every 15 minutes.
+
+It checks:
+
+- market-data connection and clock skew
+- Python engine readiness
+- Bybit Demo connection
+- signal worker status and freshness
+- stage-count order and maximum limits
+- worker failures and stale runs
+- overlaps and duplicate cycles
+- execution-off safety flags
+
+The watchdog does not generate, persist, or execute signals.
+
+Recommended runtime environment:
+
+```env
+WATCHDOG_ENABLED=true
+WATCHDOG_INTERVAL_MS=900000
+WATCHDOG_INITIAL_DELAY_MS=90000
+WATCHDOG_RUN_TIMEOUT_MS=60000
+```
+
+## Signal API
+
+```text
+GET  /api/signals
+POST /api/signals/scan
+GET  /api/signal-worker/status
+GET  /api/watchdog/status
+```
+
+`GET /api/signals` reports:
+
+```text
+storage.mode = SUPABASE_POSTGRES
+storage.table = public.trade_signals
+actionable = false
+executionEnabled = false
+```
+
+## Market Data API
+
+```text
+GET /api/market/symbols
+GET /api/market/tickers?symbol=BTCUSDT
+GET /api/market/candles/:symbol/:interval
+GET /api/market/freshness/:symbol
+```
+
+Supported intervals:
+
+```text
+5M, 15M, 1H
+```
+
+Market-data safety:
+
+- closed candles only
+- open candle excluded
+- stale and future-dated candles rejected
+- OHLC range validation
+- positive price, volume, and turnover validation
+- unsafe data blocks the pipeline
+
+## Frontend Navigation
+
+1. Dashboard
+2. Market Scanner
+3. Signals
+4. Active Trades
+5. Performance Analysis
+6. Settings
+
+Settings tabs:
+
+1. Trading Setup
+2. Bybit API
+3. Notifications
+4. Diagnostics
+5. Decision Log
+
+Diagnostics currently displays:
+
+- Automated Signal Scanner Worker status
+- next and last scan times
+- inserted, duplicate-updated, and total stored counts
+- Watchdog status
+- dependency status
+- latest pipeline stage counts
+- failure and overlap information
+
+## Safety Locks
+
+- Bybit Demo only
+- no Testnet mode
+- no real-mainnet support
+- no order-placement endpoint
+- no automatic or manual execution
+- no position sizing
+- no frontend exposure of Supabase or exchange secrets
+- backend secrets stored only in Render environment variables
+- Python cannot place orders
+- only final risk-approved candidates can be persisted
+- database records remain `actionable: false`
+- database records remain `execution_enabled: false`
+
+## Required Backend Environment
+
+```env
+TRADING_MODE=bybit_demo
+PYTHON_ENGINE_URL=https://tradebot-python-engine.onrender.com
+INTERNAL_SERVICE_TOKEN=<shared-private-token>
+FRONTEND_ORIGIN=https://tradebot-giga.onrender.com
+
+SUPABASE_URL=https://zyuvlugtygalfcjeeblj.supabase.co
+SUPABASE_SECRET_KEY=<server-side-secret-key>
+SUPABASE_REQUEST_TIMEOUT_MS=8000
+
+SIGNAL_WORKER_ENABLED=true
+SIGNAL_WORKER_INTERVAL_MS=900000
+SIGNAL_WORKER_INITIAL_DELAY_MS=30000
+SIGNAL_WORKER_RUN_TIMEOUT_MS=780000
+
+WATCHDOG_ENABLED=true
+WATCHDOG_INTERVAL_MS=900000
+WATCHDOG_INITIAL_DELAY_MS=90000
+WATCHDOG_RUN_TIMEOUT_MS=60000
+```
+
+Never commit real tokens, API secrets, or Supabase secret keys.
 
 ## Repository Structure
 
 ```text
 TradeBot/
-├── src/                       # Current React frontend
-├── backend-node/              # Node.js API and authority service
-├── engine-python/             # Python strategy service
+├── src/                       # React frontend
+├── backend-node/              # Node API, pipeline, worker, watchdog
+├── engine-python/             # Python strategy engine
 ├── shared/                    # Shared contracts and schemas
-├── docs/                      # Architecture and operations documentation
-├── infrastructure/            # Planned deployment configuration
+├── supabase/migrations/       # Database schema and RPC migrations
+├── docs/                      # Architecture and operational documentation
 ├── package.json
 └── README.md
 ```
 
-The frontend remains at the repository root so the current Render deployment is not broken.
+## Completed Milestones
 
-## Frontend Environment Variable
+- Hybrid Node + Python foundation
+- Bybit V5 market-data foundation
+- Dashboard backend and frontend integration
+- closed-candle freshness enforcement
+- 1H EMA trend scanner
+- 15M breakout and delayed retest scanner
+- 5M liquidity sweep and volume entry scanner
+- 15M swing SL and minimum 1:2 risk validation
+- final signal candidate pipeline
+- Supabase persistent signal store
+- atomic cross-cycle duplicate protection
+- 15-minute automated signal scanner worker
+- 15-minute pipeline watchdog
+- live Render runtime verification
 
-```env
-VITE_API_BASE_URL=https://tradebot-node-backend.onrender.com
-```
+## Next Review
 
-`VITE_API_BASE_URL` is public frontend configuration, not a secret. Do not place Bybit keys, Telegram credentials, database URLs, or internal service secrets in any `VITE_` variable.
+The next session should begin with runtime verification:
 
-## Next Development Step — Awaiting Approval
+1. confirm Signal Worker remains healthy
+2. confirm Watchdog remains healthy
+3. inspect the latest 15-minute pipeline counts
+4. verify Supabase insert or duplicate counts if a final candidate appears
+5. review stale Market Scanner UI messages and panel-result synchronization
 
-**Phase 2.1 — Dashboard Frontend Integration**
-
-The next development unit is to replace the static disconnected Dashboard with real data from the completed Dashboard backend endpoints. No Phase 2.1 code should start until the project owner explicitly approves it.
+No execution phase should begin without explicit approval and a separate risk-and-execution implementation plan.
