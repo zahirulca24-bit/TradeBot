@@ -7,6 +7,7 @@ import { DashboardService } from './dashboard.js';
 import { BybitMarketDataClient } from './marketData.js';
 import { checkPythonEngineReady } from './pythonEngine.js';
 import { ScannerService } from './scanner.js';
+import { UniverseSelector } from './universe.js';
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -49,12 +50,21 @@ const demoClient =
       })
     : null;
 const dashboard = new DashboardService(demoClient);
-const scanner =
+const universeSelector =
   parsedEnv.success && marketData
+    ? new UniverseSelector(marketData, {
+        baseUrl: parsedEnv.data.BYBIT_MARKET_BASE_URL,
+        requestTimeoutMs: parsedEnv.data.MARKET_REQUEST_TIMEOUT_MS,
+        maxSpreadBps: 50,
+      })
+    : null;
+const scanner =
+  parsedEnv.success && marketData && universeSelector
     ? new ScannerService(
         marketData,
         parsedEnv.data.PYTHON_ENGINE_URL,
         parsedEnv.data.INTERNAL_SERVICE_TOKEN,
+        universeSelector,
       )
     : null;
 
@@ -305,6 +315,15 @@ app.get('/api/market/freshness/:symbol', async (request, response) => {
     return response.status(200).json(await marketData.getFreshnessSnapshot(symbol));
   } catch (error) {
     return marketFailure(response, error);
+  }
+});
+
+app.get('/api/scanner/batch/one-hour', async (_request, response) => {
+  if (!scanner) return scannerFailure(response, new Error('INVALID_ENVIRONMENT'));
+  try {
+    return response.status(200).json(await scanner.scanTopUniverseOneHour());
+  } catch (error) {
+    return scannerFailure(response, error);
   }
 });
 
