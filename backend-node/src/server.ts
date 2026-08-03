@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { BybitDemoClient } from './bybitDemo.js';
 import { DashboardService } from './dashboard.js';
 import { BybitMarketDataClient } from './marketData.js';
+import { checkPythonEngineReady } from './pythonEngine.js';
 import { ScannerService } from './scanner.js';
 
 const envSchema = z.object({
@@ -14,6 +15,8 @@ const envSchema = z.object({
   PYTHON_ENGINE_URL: z.string().url(),
   INTERNAL_SERVICE_TOKEN: z.string().min(24),
   FRONTEND_ORIGIN: z.string().url(),
+  PYTHON_READY_TIMEOUT_MS: z.coerce.number().int().min(3000).max(15000).default(8000),
+  PYTHON_READY_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(4),
   BYBIT_MARKET_BASE_URL: z.literal('https://api.bybit.com').default('https://api.bybit.com'),
   MARKET_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(10000).default(5000),
   MARKET_MAX_CLOCK_SKEW_MS: z.coerce.number().int().min(250).max(10000).default(3000),
@@ -67,33 +70,33 @@ app.use(
 function marketFailure(response: express.Response, error: unknown) {
   const code = error instanceof Error ? error.message : 'MARKET_DATA_FAILURE';
   return response.status(503).json({
-    error: {
-      code,
-      message: 'Market data is not safe for actionable use.',
-      actionable: false,
-    },
+    error: { code, message: 'Market data is not safe for actionable use.', actionable: false },
   });
 }
 
 function scannerFailure(response: express.Response, error: unknown) {
   const code = error instanceof Error ? error.message : 'SCANNER_FAILURE';
   return response.status(503).json({
-    error: {
-      code,
-      message: 'Scanner analysis is unavailable.',
-      actionable: false,
-    },
+    error: { code, message: 'Scanner analysis is unavailable.', actionable: false },
   });
 }
 
 function dashboardFailure(response: express.Response, error: unknown) {
   const code = error instanceof Error ? error.message : 'DASHBOARD_FAILURE';
   return response.status(503).json({
-    error: {
-      code,
-      message: 'Dashboard data is unavailable from Bybit Demo.',
-      actionable: false,
-    },
+    error: { code, message: 'Dashboard data is unavailable from Bybit Demo.', actionable: false },
+  });
+}
+
+async function getPythonReadiness() {
+  if (!parsedEnv.success) {
+    return { ready: false, reason: 'INVALID_ENVIRONMENT', attempts: 0, upstreamStatus: null };
+  }
+  return checkPythonEngineReady({
+    baseUrl: parsedEnv.data.PYTHON_ENGINE_URL,
+    internalServiceToken: parsedEnv.data.INTERNAL_SERVICE_TOKEN,
+    timeoutMs: parsedEnv.data.PYTHON_READY_TIMEOUT_MS,
+    attempts: parsedEnv.data.PYTHON_READY_ATTEMPTS,
   });
 }
 
@@ -119,20 +122,14 @@ app.get('/ready', async (_request, response) => {
   }
 
   try {
-    const [engineResponse, clock] = await Promise.all([
-      fetch(`${parsedEnv.data.PYTHON_ENGINE_URL}/ready`, {
-        headers: { 'x-internal-service-token': parsedEnv.data.INTERNAL_SERVICE_TOKEN },
-        signal: AbortSignal.timeout(3000),
-      }),
-      marketData.assertClockSafe(),
-    ]);
-    const engineBody = await engineResponse.json();
-
-    if (!engineResponse.ok || engineBody?.ready !== true) {
+    const [python, clock] = await Promise.all([getPythonReadiness(), marketData.assertClockSafe()]);
+    if (!python.ready) {
       return response.status(503).json({
         service: 'tradebot-backend-node',
         ready: false,
-        reason: 'PYTHON_ENGINE_NOT_READY',
+        reason: 'PYTHON_ENGINE_UNAVAILABLE',
+        pythonEngineReason: python.reason,
+        attempts: python.attempts,
       });
     }
 
@@ -165,33 +162,42 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
   if (!parsedEnv.success || !marketData) {
     return response.status(503).json({
       ready: false,
+      reason: 'INVALID_ENVIRONMENT',
       tradingMode: 'unconfigured',
       executionEnabled: false,
       dependencies: { marketData: false, pythonEngine: false, bybitDemo: false },
     });
   }
+
   try {
-    const [clock, pythonResponse] = await Promise.all([
-      marketData.assertClockSafe(),
-      fetch(`${parsedEnv.data.PYTHON_ENGINE_URL}/ready`, {
-        headers: { 'x-internal-service-token': parsedEnv.data.INTERNAL_SERVICE_TOKEN },
-        signal: AbortSignal.timeout(3000),
-      }),
-    ]);
-    const pythonBody = await pythonResponse.json();
-    return response.status(pythonResponse.ok && pythonBody?.ready === true ? 200 : 503).json({
-      ready: pythonResponse.ok && pythonBody?.ready === true,
+    const [clock, python] = await Promise.all([marketData.assertClockSafe(), getPythonReadiness()]);
+    const ready = python.ready;
+    return response.status(ready ? 200 : 503).json({
+      ready,
+      reason: ready ? null : 'PYTHON_ENGINE_UNAVAILABLE',
+      pythonEngineReason: python.reason,
+      pythonEngineAttempts: python.attempts,
       tradingMode: 'bybit_demo',
       executionEnabled: false,
       dependencies: {
         marketData: true,
-        pythonEngine: pythonResponse.ok && pythonBody?.ready === true,
+        pythonEngine: ready,
         bybitDemo: demoClient !== null,
       },
       clockSkewMs: clock.skewMs,
     });
   } catch (error) {
-    return dashboardFailure(response, error);
+    return response.status(503).json({
+      ready: false,
+      reason: error instanceof Error ? error.message : 'MARKET_DATA_UNAVAILABLE',
+      tradingMode: 'bybit_demo',
+      executionEnabled: false,
+      dependencies: {
+        marketData: false,
+        pythonEngine: false,
+        bybitDemo: demoClient !== null,
+      },
+    });
   }
 });
 
@@ -199,17 +205,16 @@ app.post('/api/dashboard/engine/start', async (_request, response) => {
   if (!parsedEnv.success || !marketData) {
     return response.status(503).json({ accepted: false, engineStatus: 'BLOCKED', reason: 'INVALID_ENVIRONMENT' });
   }
+
   try {
-    const [clock, pythonResponse] = await Promise.all([
-      marketData.assertClockSafe(),
-      fetch(`${parsedEnv.data.PYTHON_ENGINE_URL}/ready`, {
-        headers: { 'x-internal-service-token': parsedEnv.data.INTERNAL_SERVICE_TOKEN },
-        signal: AbortSignal.timeout(3000),
-      }),
-    ]);
-    const pythonBody = await pythonResponse.json();
-    if (!pythonResponse.ok || pythonBody?.ready !== true || clock.skewMs > parsedEnv.data.MARKET_MAX_CLOCK_SKEW_MS) {
-      return response.status(503).json({ accepted: false, engineStatus: 'BLOCKED', reason: 'DEPENDENCY_NOT_READY' });
+    const [clock, python] = await Promise.all([marketData.assertClockSafe(), getPythonReadiness()]);
+    if (!python.ready || clock.skewMs > parsedEnv.data.MARKET_MAX_CLOCK_SKEW_MS) {
+      return response.status(503).json({
+        accepted: false,
+        engineStatus: 'BLOCKED',
+        reason: python.ready ? 'MARKET_CLOCK_UNSAFE' : 'PYTHON_ENGINE_UNAVAILABLE',
+        pythonEngineReason: python.reason,
+      });
     }
     const result = dashboard.startEngine();
     return response.status(result.accepted ? 200 : 503).json(result);
@@ -258,15 +263,13 @@ app.get('/api/market/tickers', async (request, response) => {
 
 app.get('/api/market/candles/:symbol/:interval', async (request, response) => {
   if (!marketData) return marketFailure(response, new Error('INVALID_ENVIRONMENT'));
-  const params = z
-    .object({
-      symbol: z.string().regex(/^[A-Z0-9]{3,30}$/),
-      interval: z.enum(['5', '15', '60']),
-    })
-    .safeParse({
-      symbol: request.params.symbol?.toUpperCase(),
-      interval: request.params.interval,
-    });
+  const params = z.object({
+    symbol: z.string().regex(/^[A-Z0-9]{3,30}$/),
+    interval: z.enum(['5', '15', '60']),
+  }).safeParse({
+    symbol: request.params.symbol?.toUpperCase(),
+    interval: request.params.interval,
+  });
   const limit = z.coerce.number().int().min(1).max(500).default(200).safeParse(request.query.limit ?? 200);
 
   if (!params.success || !limit.success) {
@@ -313,7 +316,6 @@ app.get('/api/scanner/trend/:symbol', async (request, response) => {
       error: { code: 'INVALID_SYMBOL', message: 'Invalid scanner symbol.', actionable: false },
     });
   }
-
   try {
     return response.status(200).json(await scanner.analyzeOneHourTrend(symbol));
   } catch (error) {

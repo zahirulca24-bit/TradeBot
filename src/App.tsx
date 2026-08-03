@@ -64,8 +64,8 @@ export default function App() {
     setIsEngineModalOpen(true);
   };
 
-  const triggerStartEngineModal = () =>
-    openWarning('engine', 'Engine Connection Failed');
+  const triggerStartEngineModal = (message = '') =>
+    openWarning('engine', message ? 'Engine Start Blocked' : 'Engine Connection Failed', message);
 
   const triggerNoBackendWarning = (message: string) =>
     openWarning('scanner', 'Backend Connection Failed', message);
@@ -80,7 +80,7 @@ export default function App() {
     openWarning('performance', 'Performance Analysis Error', message);
 
   return (
-    <div className="flex min-h-screen flex-col bg-dark-bg text-slate-100 antialiased font-sans">
+    <div className="flex min-h-screen flex-col bg-dark-bg font-sans text-slate-100 antialiased">
       <div className="flex flex-1 flex-col md:flex-row">
         <Sidebar
           currentRoute={currentRoute}
@@ -126,15 +126,15 @@ export default function App() {
       >
         <div className="space-y-4">
           <p className="text-sm font-semibold text-rose-400">
-            {modalType === 'engine' ? 'Engine control is not connected' : 'Backend service is not connected'}
+            {modalType === 'engine' ? 'Engine action was not accepted' : 'Backend service is not connected'}
           </p>
           <p className="text-xs leading-relaxed text-slate-300">
             {modalMessage ||
               'The frontend is in safe disconnected mode. No scan, execution, position change, notification, or diagnostic result has been fabricated.'}
           </p>
           <div className="rounded-lg border border-trading-border bg-card-bg p-3 font-mono text-[11px] text-slate-400">
-            <span className="block text-slate-500">Required configuration</span>
-            Set VITE_API_BASE_URL in the deployment environment and connect the approved Bybit Demo backend.
+            <span className="block text-slate-500">Backend</span>
+            {apiBaseUrl || 'VITE_API_BASE_URL is not configured'}
           </div>
         </div>
       </Modal>
