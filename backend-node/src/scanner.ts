@@ -2,6 +2,9 @@ import { z } from 'zod';
 import type { BybitMarketDataClient } from './marketData.js';
 import { postScannerJsonWithRetry } from './scannerRetry.js';
 
+const PYTHON_SCANNER_TIMEOUT_MS = 8000;
+const PYTHON_SCANNER_ATTEMPTS = 4;
+
 const trendEngineResponseSchema = z.object({
   engine: z.literal('tradebot-python'),
   strategyStage: z.literal('ONE_HOUR_TREND'),
@@ -26,8 +29,6 @@ export class ScannerService {
     private readonly marketData: BybitMarketDataClient,
     private readonly pythonEngineUrl: string,
     private readonly internalServiceToken: string,
-    private readonly pythonRequestTimeoutMs: number,
-    private readonly pythonRequestAttempts: number,
   ) {}
 
   public async analyzeOneHourTrend(symbol: string) {
@@ -38,8 +39,8 @@ export class ScannerService {
       url: `${this.pythonEngineUrl}/analysis/trend`,
       internalServiceToken: this.internalServiceToken,
       body: { symbol: requestedSymbol, candles },
-      timeoutMs: this.pythonRequestTimeoutMs,
-      attempts: this.pythonRequestAttempts,
+      timeoutMs: PYTHON_SCANNER_TIMEOUT_MS,
+      attempts: PYTHON_SCANNER_ATTEMPTS,
     });
 
     const parsed = trendEngineResponseSchema.safeParse(result.payload);
