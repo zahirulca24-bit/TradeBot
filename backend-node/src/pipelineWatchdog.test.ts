@@ -1,34 +1,63 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PipelineWatchdog } from './pipelineWatchdog.js';
+import {
+  registerSignalScannerWorker,
+  SignalScannerWorker,
+} from './signalScannerWorker.js';
 
-function snapshot(overrides: Record<string, unknown> = {}) {
+const NOW = Date.parse('2026-08-04T00:00:00.000Z');
+
+function scanResult(overrides: Record<string, unknown> = {}) {
   return {
-    generatedAt: new Date('2026-08-04T00:00:00.000Z').toISOString(),
-    durationMs: 100,
-    universe: { selectedCount: 50 },
-    oneHour: { selectedCount: 20, failedCount: 0 },
-    fifteenMinute: { selectedCount: 10, failedCount: 0 },
-    fiveMinute: { selectedCount: 3, failedCount: 0, duplicateCount: 0 },
-    finalCandidates: { selectedCount: 2, failedCount: 0, duplicateCount: 0 },
-    signalGenerationEnabled: false as const,
+    generatedAt: '2026-08-04T00:00:00.000Z',
+    durationMs: 200,
+    pipelineCounts: {
+      universe: 50,
+      oneHour: 20,
+      fifteenMinute: 10,
+      fiveMinute: 3,
+      finalCandidates: 2,
+    },
+    persistence: {
+      insertedCount: 2,
+      duplicateSuppressedCount: 0,
+      totalStored: 2,
+    },
+    signalPersistenceEnabled: true as const,
     actionable: false as const,
     executionEnabled: false as const,
     ...overrides,
   };
 }
 
-function createWatchdog(
-  pipeline: { scanTopUniverseFiveMinute: () => Promise<ReturnType<typeof snapshot>> },
-  demoConnected = true,
+function signalWorker(
+  runner: { scanAndPersist: () => Promise<ReturnType<typeof scanResult>> },
 ) {
-  return new PipelineWatchdog({
+  const worker = new SignalScannerWorker({
     enabled: true,
     intervalMs: 15 * 60_000,
     initialDelayMs: 30_000,
-    runTimeoutMs: 5_000,
-    pipeline,
-    marketData: { assertClockSafe: async () => ({ skewMs: 12 }) },
+    runTimeoutMs: 13 * 60_000,
+    runner,
+    now: () => NOW,
+  });
+  registerSignalScannerWorker(worker);
+  return worker;
+}
+
+function createWatchdog(options: {
+  demoConnected?: boolean;
+  marketData?: { assertClockSafe: () => Promise<{ skewMs: number }> };
+} = {}) {
+  const demoConnected = options.demoConnected ?? true;
+  return new PipelineWatchdog({
+    enabled: true,
+    intervalMs: 15 * 60_000,
+    initialDelayMs: 90_000,
+    runTimeoutMs: 60_000,
+    pipeline: { scanTopUniverseFiveMinute: async () => ({}) },
+    marketData: options.marketData ?? { assertClockSafe: async () => ({ skewMs: 12 }) },
     getPythonReadiness: async () => ({
       ready: true,
       reason: null,
@@ -39,12 +68,15 @@ function createWatchdog(
       connected: demoConnected,
       reason: demoConnected ? null : 'BYBIT_DEMO_NOT_CONFIGURED',
     }),
-    now: () => Date.parse('2026-08-04T00:00:00.000Z'),
+    now: () => NOW,
   });
 }
 
-test('reports healthy for a valid 50-20-10-3 pipeline snapshot', async () => {
-  const watchdog = createWatchdog({ scanTopUniverseFiveMinute: async () => snapshot() });
+test('reports healthy while supervising a successful persistence worker', async () => {
+  const worker = signalWorker({ scanAndPersist: async () => scanResult() });
+  await worker.runNow('TEST');
+
+  const watchdog = createWatchdog();
   await watchdog.runNow('TEST');
 
   const status = watchdog.getStatus();
@@ -56,25 +88,50 @@ test('reports healthy for a valid 50-20-10-3 pipeline snapshot', async () => {
     fiveMinute: 3,
     finalCandidates: 2,
   });
+  assert.equal(status.lastRun?.dependencies.signalWorker, true);
   assert.equal(status.signalPersistenceEnabled, false);
+  assert.equal(status.supervisedSignalPersistenceEnabled, true);
   assert.equal(status.executionEnabled, false);
 });
 
-test('fails closed when a pipeline stage exceeds its locked limit', async () => {
-  const watchdog = createWatchdog({
-    scanTopUniverseFiveMinute: async () => snapshot({
-      oneHour: { selectedCount: 21, failedCount: 0 },
+test('reports degraded before the signal worker completes its first cycle', async () => {
+  signalWorker({ scanAndPersist: async () => scanResult() });
+
+  const watchdog = createWatchdog();
+  await watchdog.runNow('TEST');
+
+  const status = watchdog.getStatus();
+  assert.equal(status.state, 'DEGRADED');
+  assert.ok(status.lastRun?.issues.includes('SIGNAL_WORKER_NOT_STARTED'));
+  assert.equal(status.lastRun?.dependencies.signalWorker, true);
+});
+
+test('fails closed when the automated signal worker fails', async () => {
+  const worker = signalWorker({
+    scanAndPersist: async () => scanResult({
+      persistence: {
+        insertedCount: 0,
+        duplicateSuppressedCount: 0,
+        totalStored: 0,
+      },
     }),
   });
+  await worker.runNow('TEST');
+
+  const watchdog = createWatchdog();
   await watchdog.runNow('TEST');
 
   const status = watchdog.getStatus();
   assert.equal(status.state, 'FAILED');
-  assert.ok(status.lastRun?.issues.includes('PIPELINE_LIMIT_VIOLATION'));
+  assert.ok(status.lastRun?.issues.includes('SIGNAL_WORKER_FAILED'));
+  assert.equal(status.lastRun?.dependencies.signalWorker, false);
 });
 
-test('marks a successful scan degraded when Bybit Demo health is unavailable', async () => {
-  const watchdog = createWatchdog({ scanTopUniverseFiveMinute: async () => snapshot() }, false);
+test('marks worker supervision degraded when Bybit Demo health is unavailable', async () => {
+  const worker = signalWorker({ scanAndPersist: async () => scanResult() });
+  await worker.runNow('TEST');
+
+  const watchdog = createWatchdog({ demoConnected: false });
   await watchdog.runNow('TEST');
 
   const status = watchdog.getStatus();
@@ -82,19 +139,24 @@ test('marks a successful scan degraded when Bybit Demo health is unavailable', a
   assert.ok(status.lastRun?.issues.includes('BYBIT_DEMO_UNAVAILABLE'));
 });
 
-test('skips an overlapping watchdog run and reports degradation', async () => {
-  let release!: (value: ReturnType<typeof snapshot>) => void;
-  const pending = new Promise<ReturnType<typeof snapshot>>((resolve) => {
+test('skips an overlapping watchdog run', async () => {
+  const worker = signalWorker({ scanAndPersist: async () => scanResult() });
+  await worker.runNow('TEST');
+
+  let release!: (value: { skewMs: number }) => void;
+  const pending = new Promise<{ skewMs: number }>((resolve) => {
     release = resolve;
   });
-  const watchdog = createWatchdog({ scanTopUniverseFiveMinute: async () => pending });
+  const watchdog = createWatchdog({
+    marketData: { assertClockSafe: async () => pending },
+  });
 
   const first = watchdog.runNow('TEST');
   await new Promise((resolve) => setImmediate(resolve));
   await watchdog.runNow('TEST');
-
   assert.equal(watchdog.getStatus().skippedOverlaps, 1);
-  release(snapshot());
+
+  release({ skewMs: 12 });
   await first;
   const status = watchdog.getStatus();
   assert.equal(status.state, 'DEGRADED');

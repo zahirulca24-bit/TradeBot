@@ -1,3 +1,9 @@
+import {
+  getRegisteredSignalScannerWorkerStatus,
+  type SignalScannerWorkerStatus,
+  type SignalWorkerPipelineCounts,
+} from './signalScannerWorker.js';
+
 type WatchdogState = 'DISABLED' | 'IDLE' | 'RUNNING' | 'HEALTHY' | 'DEGRADED' | 'FAILED';
 type WatchdogTrigger = 'SCHEDULED' | 'STARTUP' | 'TEST';
 
@@ -13,23 +19,6 @@ type DemoHealth = {
   reason: string | null;
 };
 
-type PipelineSnapshot = {
-  generatedAt: string;
-  durationMs: number;
-  universe: { selectedCount: number };
-  oneHour: { selectedCount: number; failedCount: number };
-  fifteenMinute: { selectedCount: number; failedCount: number };
-  fiveMinute: { selectedCount: number; failedCount: number; duplicateCount: number };
-  finalCandidates: { selectedCount: number; failedCount: number; duplicateCount: number };
-  signalGenerationEnabled: false;
-  actionable: false;
-  executionEnabled: false;
-};
-
-interface PipelineRunner {
-  scanTopUniverseFiveMinute(): Promise<PipelineSnapshot>;
-}
-
 interface MarketClockChecker {
   assertClockSafe(): Promise<{ skewMs: number }>;
 }
@@ -39,19 +28,11 @@ export interface PipelineWatchdogOptions {
   intervalMs: number;
   initialDelayMs: number;
   runTimeoutMs: number;
-  pipeline: PipelineRunner;
+  pipeline: { scanTopUniverseFiveMinute(): Promise<unknown> };
   marketData: MarketClockChecker;
   getPythonReadiness: () => Promise<PythonReadiness>;
   getDemoHealth: () => Promise<DemoHealth>;
   now?: () => number;
-}
-
-export interface WatchdogStageCounts {
-  universe: number;
-  oneHour: number;
-  fifteenMinute: number;
-  fiveMinute: number;
-  finalCandidates: number;
 }
 
 export interface WatchdogRunRecord {
@@ -68,11 +49,14 @@ export interface WatchdogRunRecord {
     marketData: boolean;
     pythonEngine: boolean;
     bybitDemo: boolean;
+    signalWorker: boolean;
     clockSkewMs: number | null;
     pythonReason: string | null;
     demoReason: string | null;
+    signalWorkerReason: string | null;
   };
-  counts: WatchdogStageCounts | null;
+  counts: SignalWorkerPipelineCounts | null;
+  signalWorker: SignalScannerWorkerStatus | null;
   issues: string[];
 }
 
@@ -89,7 +73,9 @@ export interface PipelineWatchdogStatus {
   skippedOverlaps: number;
   skippedDuplicateCycles: number;
   lastRun: WatchdogRunRecord | null;
+  signalWorker: SignalScannerWorkerStatus | null;
   signalPersistenceEnabled: false;
+  supervisedSignalPersistenceEnabled: true;
   executionEnabled: false;
 }
 
@@ -127,7 +113,9 @@ export class PipelineWatchdog {
       skippedOverlaps: 0,
       skippedDuplicateCycles: 0,
       lastRun: null,
+      signalWorker: getRegisteredSignalScannerWorkerStatus(),
       signalPersistenceEnabled: false,
+      supervisedSignalPersistenceEnabled: true,
       executionEnabled: false,
     };
   }
@@ -144,6 +132,7 @@ export class PipelineWatchdog {
   }
 
   public getStatus(): PipelineWatchdogStatus {
+    this.status.signalWorker = getRegisteredSignalScannerWorkerStatus();
     return structuredClone(this.status);
   }
 
@@ -232,11 +221,14 @@ export class PipelineWatchdog {
         marketData: false,
         pythonEngine: false,
         bybitDemo: false,
+        signalWorker: false,
         clockSkewMs: null,
         pythonReason: null,
         demoReason: null,
+        signalWorkerReason: null,
       },
       counts: null,
+      signalWorker: null,
       issues: [],
     };
     this.status.lastRun = run;
@@ -273,27 +265,30 @@ export class PipelineWatchdog {
         run.issues.push('BYBIT_DEMO_UNAVAILABLE');
       }
 
-      if (!run.dependencies.marketData || !run.dependencies.pythonEngine) {
+      const worker = getRegisteredSignalScannerWorkerStatus();
+      run.signalWorker = worker;
+      this.status.signalWorker = worker;
+      this.evaluateSignalWorker(worker, run, startedAtMs);
+
+      if (
+        !run.dependencies.marketData ||
+        !run.dependencies.pythonEngine ||
+        !run.dependencies.signalWorker
+      ) {
         throw new Error('WATCHDOG_REQUIRED_DEPENDENCY_UNAVAILABLE');
       }
 
-      const pipeline = await this.options.pipeline.scanTopUniverseFiveMinute();
-      run.counts = {
-        universe: pipeline.universe.selectedCount,
-        oneHour: pipeline.oneHour.selectedCount,
-        fifteenMinute: pipeline.fifteenMinute.selectedCount,
-        fiveMinute: pipeline.fiveMinute.selectedCount,
-        finalCandidates: pipeline.finalCandidates.selectedCount,
-      };
-      run.issues = uniqueIssues([...run.issues, ...this.validatePipeline(pipeline)]);
-
+      run.issues = uniqueIssues(run.issues);
       const hardFailure = run.issues.some((issue) =>
         [
           'WATCHDOG_RUN_TIMEOUT',
-          'PIPELINE_LIMIT_VIOLATION',
-          'PIPELINE_STAGE_ORDER_VIOLATION',
-          'PIPELINE_SAFETY_FLAG_VIOLATION',
-          'PIPELINE_TIMESTAMP_INVALID',
+          'SIGNAL_WORKER_UNAVAILABLE',
+          'SIGNAL_WORKER_FAILED',
+          'SIGNAL_WORKER_STALE',
+          'SIGNAL_WORKER_PIPELINE_LIMIT_VIOLATION',
+          'SIGNAL_WORKER_STAGE_ORDER_VIOLATION',
+          'SIGNAL_WORKER_SAFETY_FLAG_VIOLATION',
+          'WATCHDOG_REQUIRED_DEPENDENCY_UNAVAILABLE',
         ].includes(issue),
       );
       run.state = hardFailure ? 'FAILED' : run.issues.length > 0 ? 'DEGRADED' : 'HEALTHY';
@@ -316,43 +311,80 @@ export class PipelineWatchdog {
     }
   }
 
-  private validatePipeline(pipeline: PipelineSnapshot): string[] {
+  private evaluateSignalWorker(
+    worker: SignalScannerWorkerStatus | null,
+    run: WatchdogRunRecord,
+    observedAtMs: number,
+  ): void {
+    if (!worker || !worker.enabled) {
+      run.dependencies.signalWorkerReason = 'SIGNAL_WORKER_UNAVAILABLE';
+      run.issues.push('SIGNAL_WORKER_UNAVAILABLE');
+      return;
+    }
+
+    run.counts = worker.lastRun?.pipelineCounts ?? null;
+
+    if (!worker.signalPersistenceEnabled || worker.executionEnabled) {
+      run.dependencies.signalWorkerReason = 'SIGNAL_WORKER_SAFETY_FLAG_VIOLATION';
+      run.issues.push('SIGNAL_WORKER_SAFETY_FLAG_VIOLATION');
+      return;
+    }
+
+    if (worker.state === 'FAILED' || worker.consecutiveFailures > 0) {
+      run.dependencies.signalWorkerReason = 'SIGNAL_WORKER_FAILED';
+      run.issues.push('SIGNAL_WORKER_FAILED');
+      return;
+    }
+
+    if (worker.lastSuccessAt) {
+      const lastSuccessMs = Date.parse(worker.lastSuccessAt);
+      const maximumAgeMs = worker.intervalMs + worker.runTimeoutMs + 60_000;
+      if (!Number.isFinite(lastSuccessMs) || observedAtMs - lastSuccessMs > maximumAgeMs) {
+        run.dependencies.signalWorkerReason = 'SIGNAL_WORKER_STALE';
+        run.issues.push('SIGNAL_WORKER_STALE');
+        return;
+      }
+    } else if (!worker.running) {
+      run.dependencies.signalWorkerReason = 'SIGNAL_WORKER_NOT_STARTED';
+      run.issues.push('SIGNAL_WORKER_NOT_STARTED');
+    }
+
+    const countIssues = this.validateCounts(run.counts);
+    run.issues.push(...countIssues);
+    if (countIssues.length > 0) {
+      run.dependencies.signalWorkerReason = countIssues[0] ?? 'SIGNAL_WORKER_INVALID_COUNTS';
+      return;
+    }
+
+    run.dependencies.signalWorker = true;
+    run.dependencies.signalWorkerReason = worker.running ? 'SIGNAL_WORKER_RUNNING' : null;
+  }
+
+  private validateCounts(counts: SignalWorkerPipelineCounts | null): string[] {
+    if (!counts) return [];
     const issues: string[] = [];
-    const universeCount = pipeline.universe.selectedCount;
-    const oneHourCount = pipeline.oneHour.selectedCount;
-    const fifteenMinuteCount = pipeline.fifteenMinute.selectedCount;
-    const fiveMinuteCount = pipeline.fiveMinute.selectedCount;
-    const finalCandidateCount = pipeline.finalCandidates.selectedCount;
 
     if (
-      universeCount > 50 ||
-      oneHourCount > 20 ||
-      fifteenMinuteCount > 10 ||
-      fiveMinuteCount > 3 ||
-      finalCandidateCount > 3
+      counts.universe > 50 ||
+      counts.oneHour > 20 ||
+      counts.fifteenMinute > 10 ||
+      counts.fiveMinute > 3 ||
+      counts.finalCandidates > 3
     ) {
-      issues.push('PIPELINE_LIMIT_VIOLATION');
+      issues.push('SIGNAL_WORKER_PIPELINE_LIMIT_VIOLATION');
     }
+
     if (
       !(
-        universeCount >= oneHourCount &&
-        oneHourCount >= fifteenMinuteCount &&
-        fifteenMinuteCount >= fiveMinuteCount &&
-        fiveMinuteCount >= finalCandidateCount
+        counts.universe >= counts.oneHour &&
+        counts.oneHour >= counts.fifteenMinute &&
+        counts.fifteenMinute >= counts.fiveMinute &&
+        counts.fiveMinute >= counts.finalCandidates
       )
     ) {
-      issues.push('PIPELINE_STAGE_ORDER_VIOLATION');
+      issues.push('SIGNAL_WORKER_STAGE_ORDER_VIOLATION');
     }
-    if (pipeline.actionable || pipeline.executionEnabled || pipeline.signalGenerationEnabled) {
-      issues.push('PIPELINE_SAFETY_FLAG_VIOLATION');
-    }
-    if (!Number.isFinite(Date.parse(pipeline.generatedAt))) issues.push('PIPELINE_TIMESTAMP_INVALID');
-    if (pipeline.oneHour.failedCount > 0) issues.push('ONE_HOUR_STAGE_FAILURES');
-    if (pipeline.fifteenMinute.failedCount > 0) issues.push('FIFTEEN_MINUTE_STAGE_FAILURES');
-    if (pipeline.fiveMinute.failedCount > 0) issues.push('FIVE_MINUTE_STAGE_FAILURES');
-    if (pipeline.finalCandidates.failedCount > 0) issues.push('FINAL_RISK_STAGE_FAILURES');
-    if (pipeline.fiveMinute.duplicateCount > 0) issues.push('FIVE_MINUTE_DUPLICATES_BLOCKED');
-    if (pipeline.finalCandidates.duplicateCount > 0) issues.push('FINAL_CANDIDATE_DUPLICATES_BLOCKED');
+
     return issues;
   }
 
@@ -363,6 +395,7 @@ export class PipelineWatchdog {
       loggedAt: new Date(this.now()).toISOString(),
       data,
       signalPersistenceEnabled: false,
+      supervisedSignalPersistenceEnabled: true,
       executionEnabled: false,
     }));
   }
