@@ -318,6 +318,15 @@ app.get('/api/market/freshness/:symbol', async (request, response) => {
   }
 });
 
+app.get('/api/scanner/batch/fifteen-minute', async (_request, response) => {
+  if (!scanner) return scannerFailure(response, new Error('INVALID_ENVIRONMENT'));
+  try {
+    return response.status(200).json(await scanner.scanTopUniverseFifteenMinute());
+  } catch (error) {
+    return scannerFailure(response, error);
+  }
+});
+
 app.get('/api/scanner/batch/one-hour', async (_request, response) => {
   if (!scanner) return scannerFailure(response, new Error('INVALID_ENVIRONMENT'));
   try {

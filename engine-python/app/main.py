@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .setup import SetupCandle, SetupDirection, analyze_fifteen_minute_setup
 from .trend import TrendCandle, analyze_one_hour_trend
 
 
@@ -37,7 +38,26 @@ class TrendAnalysisRequest(BaseModel):
     candles: list[TrendCandleRequest] = Field(min_length=200, max_length=500)
 
 
-app = FastAPI(title="TradeBot Python Strategy Engine", version="0.2.0")
+class SetupCandleRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    interval: str = Field(pattern=r"^15$")
+    startTimeMs: int = Field(gt=0)
+    closeTimeMs: int = Field(gt=0)
+    open: float = Field(gt=0)
+    high: float = Field(gt=0)
+    low: float = Field(gt=0)
+    close: float = Field(gt=0)
+    volume: float = Field(gt=0)
+    turnover: float = Field(gt=0)
+
+
+class SetupAnalysisRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    direction: SetupDirection
+    candles: list[SetupCandleRequest] = Field(min_length=40, max_length=500)
+
+
+app = FastAPI(title="TradeBot Python Strategy Engine", version="0.3.0")
 
 
 def load_settings() -> Settings | None:
@@ -82,7 +102,7 @@ def health() -> dict[str, object]:
         "status": "healthy" if configured else "degraded",
         "tradingMode": "bybit_demo" if configured else "unconfigured",
         "executionAuthority": False,
-        "scannerCapabilities": ["ONE_HOUR_EMA_TREND"],
+        "scannerCapabilities": ["ONE_HOUR_EMA_TREND", "FIFTEEN_MINUTE_BREAKOUT_RETEST"],
     }
 
 
@@ -96,7 +116,7 @@ def ready(
         "ready": True,
         "tradingMode": "bybit_demo",
         "executionAuthority": False,
-        "scannerCapabilities": ["ONE_HOUR_EMA_TREND"],
+        "scannerCapabilities": ["ONE_HOUR_EMA_TREND", "FIFTEEN_MINUTE_BREAKOUT_RETEST"],
     }
 
 
@@ -149,6 +169,71 @@ def analyze_trend(
             "ema20": analysis.ema20,
             "ema50": analysis.ema50,
             "ema200": analysis.ema200,
+        },
+        "candleCount": analysis.candle_count,
+        "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,
+        "reasons": list(analysis.reasons),
+        "actionable": False,
+    }
+
+
+@app.post("/analysis/setup")
+def analyze_setup(
+    request: SetupAnalysisRequest,
+    x_internal_service_token: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    require_internal_service(x_internal_service_token)
+
+    if any(candle.symbol != request.symbol for candle in request.candles):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "CANDLE_SYMBOL_MISMATCH"},
+        )
+
+    try:
+        analysis = analyze_fifteen_minute_setup(
+            [
+                SetupCandle(
+                    symbol=candle.symbol,
+                    interval=candle.interval,
+                    start_time_ms=candle.startTimeMs,
+                    close_time_ms=candle.closeTimeMs,
+                    open=candle.open,
+                    high=candle.high,
+                    low=candle.low,
+                    close=candle.close,
+                    volume=candle.volume,
+                    turnover=candle.turnover,
+                )
+                for candle in request.candles
+            ],
+            request.direction,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": str(error)},
+        ) from error
+
+    return {
+        "engine": "tradebot-python",
+        "strategyStage": "FIFTEEN_MINUTE_SETUP",
+        "symbol": analysis.symbol,
+        "interval": analysis.interval,
+        "direction": analysis.direction.value,
+        "passed": analysis.passed,
+        "indicators": {
+            "latestClose": analysis.latest_close,
+            "rsi14": analysis.rsi14,
+        },
+        "setup": {
+            "breakoutLevel": analysis.breakout_level,
+            "breakoutCandleCloseTimeMs": analysis.breakout_candle_close_time_ms,
+            "retestCandleCloseTimeMs": analysis.retest_candle_close_time_ms,
+            "breakoutAgeCandles": analysis.breakout_age_candles,
+            "breakoutLookbackCandles": 20,
+            "retestWindowMinCandles": 1,
+            "retestWindowMaxCandles": 5,
         },
         "candleCount": analysis.candle_count,
         "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,

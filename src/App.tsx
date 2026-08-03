@@ -8,6 +8,7 @@ import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import DashboardView from './components/DashboardView';
 import MarketScannerView from './components/MarketScannerView';
+import FifteenMinutePipelinePanel from './components/FifteenMinutePipelinePanel';
 import SignalsView from './components/SignalsView';
 import ActiveTradesView from './components/ActiveTradesView';
 import PerformanceView from './components/PerformanceView';
@@ -100,7 +101,16 @@ export default function App() {
                 <DashboardView apiBaseUrl={apiBaseUrl} onStartEngineClick={triggerStartEngineModal} />
               )}
               {currentRoute === 'market-scanner' && (
-                <MarketScannerView apiBaseUrl={apiBaseUrl} onTriggerNoBackendWarning={triggerNoBackendWarning} />
+                <div className="space-y-6">
+                  <FifteenMinutePipelinePanel
+                    apiBaseUrl={apiBaseUrl}
+                    onTriggerNoBackendWarning={triggerNoBackendWarning}
+                  />
+                  <MarketScannerView
+                    apiBaseUrl={apiBaseUrl}
+                    onTriggerNoBackendWarning={triggerNoBackendWarning}
+                  />
+                </div>
               )}
               {currentRoute === 'signals' && (
                 <SignalsView apiBaseUrl={apiBaseUrl} onTriggerNoBackendWarning={triggerSignalsWarning} />
