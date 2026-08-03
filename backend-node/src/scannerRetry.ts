@@ -10,6 +10,8 @@ const engineErrorSchema = z.object({
     .optional(),
 });
 
+class NonRetryableScannerError extends Error {}
+
 export interface ScannerRequestOptions {
   url: string;
   internalServiceToken: string;
@@ -57,6 +59,9 @@ export async function postScannerJsonWithRetry(
       const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
       if (!contentType.includes('application/json')) {
         lastError = `PYTHON_ENGINE_NON_JSON_HTTP_${response.status}`;
+        if (!transientStatuses.has(response.status)) {
+          throw new NonRetryableScannerError(lastError);
+        }
       } else {
         const payload = await response.json().catch(() => null);
         if (payload === null) {
@@ -68,27 +73,14 @@ export async function postScannerJsonWithRetry(
           const code = parsedError.success ? parsedError.data.detail?.code : undefined;
           lastError = code || `PYTHON_ENGINE_HTTP_${response.status}`;
 
-          if (response.status === 401 || response.status === 403 || response.status === 422) {
-            throw new Error(lastError);
+          if (!transientStatuses.has(response.status)) {
+            throw new NonRetryableScannerError(lastError);
           }
         }
       }
-
-      if (!transientStatuses.has(response.status)) {
-        throw new Error(lastError);
-      }
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith('PYTHON_ENGINE_')) {
-        lastError = error.message;
-        if (
-          lastError.startsWith('PYTHON_ENGINE_HTTP_401') ||
-          lastError.startsWith('PYTHON_ENGINE_HTTP_403')
-        ) {
-          throw error;
-        }
-      } else {
-        lastError = normalizeFetchError(error);
-      }
+      if (error instanceof NonRetryableScannerError) throw error;
+      lastError = normalizeFetchError(error);
     }
 
     if (attempt < options.attempts) {
