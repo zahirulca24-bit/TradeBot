@@ -1,11 +1,15 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 
 const signalDirectionSchema = z.enum(['LONG', 'SHORT']);
 const signalStatusSchema = z.literal('VALID');
 const executionStatusSchema = z.literal('NOT_EXECUTED');
+
+const signalEvidenceSchema = z.object({
+  volumeRatio: z.number().positive(),
+  sweepDepthBps: z.number().nonnegative(),
+  reasons: z.array(z.string().min(1)).min(1),
+  candidateRank: z.number().int().min(1).max(3),
+});
 
 const storedSignalSchema = z.object({
   signalCandidateKey: z.string().min(1).max(240),
@@ -30,35 +34,67 @@ const storedSignalSchema = z.object({
   actionable: z.literal(false),
 });
 
-const signalStoreDocumentSchema = z.object({
-  version: z.literal(1),
-  updatedAt: z.string().datetime(),
-  signals: z.array(storedSignalSchema),
+const signalCandidateSchema = z.object({
+  signalCandidateKey: z.string().min(1).max(240),
+  symbol: z.string().regex(/^[A-Z0-9]{3,30}$/),
+  direction: signalDirectionSchema,
+  entryPrice: z.number().positive(),
+  stopLoss: z.number().positive(),
+  targetPrice: z.number().positive(),
+  riskDistance: z.number().positive(),
+  riskRewardRatio: z.number().min(2),
+  riskBps: z.number().positive(),
+  swingPrice: z.number().positive(),
+  swingAgeCandles: z.number().int().min(1),
+  entryKey: z.string().min(1).max(240),
+  volumeRatio: z.number().positive(),
+  sweepDepthBps: z.number().nonnegative(),
+  entryCandleCloseTimeMs: z.number().int().positive(),
+  swingCandleCloseTimeMs: z.number().int().positive(),
+  reasons: z.array(z.string().min(1)).min(1),
+  candidateRank: z.number().int().min(1).max(3),
 });
 
+const databaseSignalSchema = z.object({
+  signal_candidate_key: z.string().min(1).max(240),
+  symbol: z.string().regex(/^[A-Z0-9]{3,30}$/),
+  direction: signalDirectionSchema,
+  entry_price: z.coerce.number().positive(),
+  stop_loss: z.coerce.number().positive(),
+  target_price: z.coerce.number().positive(),
+  risk_distance: z.coerce.number().positive(),
+  risk_bps: z.coerce.number().positive(),
+  risk_reward_ratio: z.coerce.number().min(2),
+  entry_candle_close_time_ms: z.coerce.number().int().positive(),
+  swing_price: z.coerce.number().positive(),
+  swing_candle_close_time_ms: z.coerce.number().int().positive(),
+  swing_age_candles: z.coerce.number().int().min(1),
+  entry_key: z.string().min(1),
+  evidence: signalEvidenceSchema,
+  seen_count: z.coerce.number().int().min(1),
+  first_seen_at: z.string().datetime(),
+  last_seen_at: z.string().datetime(),
+  actionable: z.literal(false),
+  execution_enabled: z.literal(false),
+});
+
+const rpcResponseSchema = z.array(
+  z.object({
+    inserted: z.boolean(),
+    signal: databaseSignalSchema,
+  }),
+).length(1);
+
 export type StoredSignal = z.infer<typeof storedSignalSchema>;
+export type SignalCandidateInput = z.infer<typeof signalCandidateSchema>;
 
-export interface SignalCandidateInput {
-  signalCandidateKey: string;
-  symbol: string;
-  direction: 'LONG' | 'SHORT';
-  entryPrice: number;
-  stopLoss: number;
-  targetPrice: number;
-  riskRewardRatio: number;
-  riskBps: number;
-  volumeRatio: number;
-  sweepDepthBps: number;
-  entryCandleCloseTimeMs: number;
-  swingCandleCloseTimeMs: number;
-  reasons: string[];
-  candidateRank: number;
-}
+type FetchLike = typeof fetch;
 
-interface SignalStoreDocument {
-  version: 1;
-  updatedAt: string;
-  signals: StoredSignal[];
+export interface SignalStoreOptions {
+  supabaseUrl: string;
+  secretKey: string;
+  requestTimeoutMs?: number;
+  fetchImpl?: FetchLike;
 }
 
 export interface SignalUpsertResult {
@@ -69,30 +105,87 @@ export interface SignalUpsertResult {
   totalStored: number;
 }
 
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && 'code' in error;
+function normalizeSupabaseUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    throw new Error('INVALID_SUPABASE_URL');
+  }
+  if (parsed.protocol !== 'https:') throw new Error('INVALID_SUPABASE_URL');
+  return parsed.toString().replace(/\/$/, '');
 }
 
-function emptyDocument(now: string): SignalStoreDocument {
-  return { version: 1, updatedAt: now, signals: [] };
+function mapDatabaseSignal(value: unknown): StoredSignal {
+  const row = databaseSignalSchema.parse(value);
+  return storedSignalSchema.parse({
+    signalCandidateKey: row.signal_candidate_key,
+    symbol: row.symbol,
+    direction: row.direction,
+    status: 'VALID',
+    executionStatus: 'NOT_EXECUTED',
+    entryPrice: row.entry_price,
+    stopLoss: row.stop_loss,
+    targetPrice: row.target_price,
+    riskRewardRatio: row.risk_reward_ratio,
+    riskBps: row.risk_bps,
+    volumeRatio: row.evidence.volumeRatio,
+    sweepDepthBps: row.evidence.sweepDepthBps,
+    entryCandleCloseTimeMs: row.entry_candle_close_time_ms,
+    swingCandleCloseTimeMs: row.swing_candle_close_time_ms,
+    reasons: row.evidence.reasons,
+    candidateRank: row.evidence.candidateRank,
+    createdAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    seenCount: row.seen_count,
+    actionable: false,
+  });
+}
+
+function normalizeFetchError(error: unknown): Error {
+  if (error instanceof DOMException && error.name === 'TimeoutError') {
+    return new Error('SUPABASE_SIGNAL_STORE_TIMEOUT');
+  }
+  if (error instanceof Error && error.name === 'AbortError') {
+    return new Error('SUPABASE_SIGNAL_STORE_TIMEOUT');
+  }
+  return new Error('SUPABASE_SIGNAL_STORE_UNREACHABLE', { cause: error });
 }
 
 export class SignalStore {
-  private writeQueue: Promise<void> = Promise.resolve();
-  private readonly absolutePath: string;
+  private readonly supabaseUrl: string;
+  private readonly secretKey: string;
+  private readonly requestTimeoutMs: number;
+  private readonly fetchImpl: FetchLike;
 
-  public constructor(filePath: string) {
-    const normalized = filePath.trim();
-    if (!normalized) throw new Error('INVALID_SIGNAL_STORE_PATH');
-    this.absolutePath = resolve(normalized);
+  public constructor(options: SignalStoreOptions) {
+    this.supabaseUrl = normalizeSupabaseUrl(options.supabaseUrl);
+    this.secretKey = options.secretKey.trim();
+    if (this.secretKey.length < 32) throw new Error('INVALID_SUPABASE_SECRET_KEY');
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 8_000;
+    if (!Number.isInteger(this.requestTimeoutMs) || this.requestTimeoutMs < 1_000 || this.requestTimeoutMs > 20_000) {
+      throw new Error('INVALID_SUPABASE_REQUEST_TIMEOUT');
+    }
+    this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   public storageInfo() {
     return {
-      mode: 'ATOMIC_JSON_FILE',
-      crossCycleDuplicateKey: 'signalCandidateKey',
-      processWriteSerialization: true,
-      deploymentDurability: 'REQUIRES_PERSISTENT_FILESYSTEM_OR_RENDER_DISK',
+      mode: 'SUPABASE_POSTGRES',
+      table: 'public.trade_signals',
+      crossCycleDuplicateKey: 'signal_candidate_key',
+      duplicateMutation: 'ATOMIC_RPC_SEEN_COUNT_INCREMENT',
+      deploymentDurability: 'MANAGED_POSTGRES_PERSISTENCE',
+      clientExposure: false,
+    } as const;
+  }
+
+  public async checkReady() {
+    await this.count();
+    return {
+      ready: true,
+      mode: 'SUPABASE_POSTGRES',
+      table: 'public.trade_signals',
     } as const;
   }
 
@@ -101,12 +194,12 @@ export class SignalStore {
       throw new Error('INVALID_SIGNAL_LIST_LIMIT');
     }
 
-    return this.serialized(async () => {
-      const document = await this.readDocument();
-      return [...document.signals]
-        .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
-        .slice(0, limit);
-    });
+    const payload = await this.requestJson(
+      `/rest/v1/trade_signals?select=*&order=last_seen_at.desc&limit=${limit}`,
+      { method: 'GET' },
+    );
+    const rows = z.array(databaseSignalSchema).parse(payload);
+    return rows.map(mapDatabaseSignal);
   }
 
   public async upsert(
@@ -116,112 +209,122 @@ export class SignalStore {
     const parsedTime = z.string().datetime().safeParse(observedAt);
     if (!parsedTime.success) throw new Error('INVALID_SIGNAL_OBSERVED_AT');
 
-    return this.serialized(async () => {
-      const document = await this.readDocument(observedAt);
-      const byKey = new Map(document.signals.map((signal) => [signal.signalCandidateKey, signal]));
-      const inserted: StoredSignal[] = [];
-      const duplicates: StoredSignal[] = [];
-      const seenInRequest = new Set<string>();
+    const parsedCandidates = z.array(signalCandidateSchema).max(3).parse(candidates);
+    const inserted: StoredSignal[] = [];
+    const duplicates: StoredSignal[] = [];
+    const processed = new Map<string, StoredSignal>();
 
-      for (const candidate of candidates) {
-        if (seenInRequest.has(candidate.signalCandidateKey)) {
-          const existing = byKey.get(candidate.signalCandidateKey);
-          if (existing) duplicates.push(existing);
-          continue;
-        }
-        seenInRequest.add(candidate.signalCandidateKey);
-
-        const current = byKey.get(candidate.signalCandidateKey);
-        if (current) {
-          const updated: StoredSignal = storedSignalSchema.parse({
-            ...current,
-            lastSeenAt: observedAt,
-            seenCount: current.seenCount + 1,
-          });
-          byKey.set(candidate.signalCandidateKey, updated);
-          duplicates.push(updated);
-          continue;
-        }
-
-        const created: StoredSignal = storedSignalSchema.parse({
-          ...candidate,
-          status: 'VALID',
-          executionStatus: 'NOT_EXECUTED',
-          createdAt: observedAt,
-          lastSeenAt: observedAt,
-          seenCount: 1,
-          actionable: false,
-        });
-        byKey.set(candidate.signalCandidateKey, created);
-        inserted.push(created);
+    for (const candidate of parsedCandidates) {
+      const alreadyProcessed = processed.get(candidate.signalCandidateKey);
+      if (alreadyProcessed) {
+        duplicates.push(alreadyProcessed);
+        continue;
       }
 
-      const nextSignals = [...byKey.values()].sort((left, right) =>
-        right.lastSeenAt.localeCompare(left.lastSeenAt),
-      );
-      const nextDocument: SignalStoreDocument = {
-        version: 1,
-        updatedAt: observedAt,
-        signals: nextSignals,
-      };
-
-      await this.writeDocument(nextDocument);
-      return {
-        insertedCount: inserted.length,
-        duplicateSuppressedCount: duplicates.length,
-        inserted,
-        duplicates,
-        totalStored: nextSignals.length,
-      };
-    });
-  }
-
-  private serialized<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.writeQueue.then(operation, operation);
-    this.writeQueue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
-
-  private async readDocument(now = new Date().toISOString()): Promise<SignalStoreDocument> {
-    let raw: string;
-    try {
-      raw = await readFile(this.absolutePath, 'utf8');
-    } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') return emptyDocument(now);
-      throw new Error('SIGNAL_STORE_READ_FAILED', { cause: error });
-    }
-
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(raw);
-    } catch (error) {
-      throw new Error('SIGNAL_STORE_CORRUPT', { cause: error });
-    }
-
-    const parsed = signalStoreDocumentSchema.safeParse(parsedJson);
-    if (!parsed.success) {
-      throw new Error('SIGNAL_STORE_CORRUPT', { cause: parsed.error });
-    }
-    return parsed.data;
-  }
-
-  private async writeDocument(document: SignalStoreDocument): Promise<void> {
-    const parsed = signalStoreDocumentSchema.parse(document);
-    const directory = dirname(this.absolutePath);
-    const temporaryPath = `${this.absolutePath}.${process.pid}.${randomUUID()}.tmp`;
-
-    try {
-      await mkdir(directory, { recursive: true });
-      await writeFile(temporaryPath, `${JSON.stringify(parsed, null, 2)}\n`, {
-        encoding: 'utf8',
-        mode: 0o600,
+      const payload = await this.requestJson('/rest/v1/rpc/upsert_trade_signal', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_signal: {
+            signal_candidate_key: candidate.signalCandidateKey,
+            symbol: candidate.symbol,
+            direction: candidate.direction,
+            entry_price: candidate.entryPrice,
+            stop_loss: candidate.stopLoss,
+            target_price: candidate.targetPrice,
+            risk_distance: candidate.riskDistance,
+            risk_bps: candidate.riskBps,
+            risk_reward_ratio: candidate.riskRewardRatio,
+            entry_candle_close_time_ms: candidate.entryCandleCloseTimeMs,
+            swing_price: candidate.swingPrice,
+            swing_candle_close_time_ms: candidate.swingCandleCloseTimeMs,
+            swing_age_candles: candidate.swingAgeCandles,
+            entry_key: candidate.entryKey,
+            evidence: {
+              volumeRatio: candidate.volumeRatio,
+              sweepDepthBps: candidate.sweepDepthBps,
+              reasons: candidate.reasons,
+              candidateRank: candidate.candidateRank,
+            },
+          },
+          p_observed_at: observedAt,
+        }),
       });
-      await rename(temporaryPath, this.absolutePath);
-    } catch (error) {
-      throw new Error('SIGNAL_STORE_WRITE_FAILED', { cause: error });
+
+      const result = rpcResponseSchema.parse(payload)[0];
+      if (!result) throw new Error('SUPABASE_SIGNAL_RPC_EMPTY_RESPONSE');
+      const stored = mapDatabaseSignal(result.signal);
+      processed.set(candidate.signalCandidateKey, stored);
+      if (result.inserted) inserted.push(stored);
+      else duplicates.push(stored);
     }
+
+    return {
+      insertedCount: inserted.length,
+      duplicateSuppressedCount: duplicates.length,
+      inserted,
+      duplicates,
+      totalStored: await this.count(),
+    };
+  }
+
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    return {
+      accept: 'application/json',
+      apikey: this.secretKey,
+      authorization: `Bearer ${this.secretKey}`,
+      'content-type': 'application/json',
+      ...extra,
+    };
+  }
+
+  private async count(): Promise<number> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.supabaseUrl}/rest/v1/trade_signals?select=id&limit=1`, {
+        method: 'GET',
+        headers: this.headers({ prefer: 'count=exact' }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (error) {
+      throw normalizeFetchError(error);
+    }
+
+    if (!response.ok) throw this.httpError(response.status);
+    const contentRange = response.headers.get('content-range');
+    const totalText = contentRange?.split('/')[1];
+    const total = totalText === undefined ? Number.NaN : Number(totalText);
+    if (!Number.isInteger(total) || total < 0) throw new Error('SUPABASE_SIGNAL_COUNT_INVALID');
+    return total;
+  }
+
+  private async requestJson(path: string, init: RequestInit): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.supabaseUrl}${path}`, {
+        ...init,
+        headers: this.headers(init.headers as Record<string, string> | undefined),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (error) {
+      throw normalizeFetchError(error);
+    }
+
+    if (!response.ok) throw this.httpError(response.status);
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('SUPABASE_SIGNAL_STORE_NON_JSON_RESPONSE');
+    }
+
+    try {
+      return await response.json();
+    } catch (error) {
+      throw new Error('SUPABASE_SIGNAL_STORE_INVALID_JSON', { cause: error });
+    }
+  }
+
+  private httpError(status: number): Error {
+    if (status === 401 || status === 403) return new Error('SUPABASE_SIGNAL_STORE_AUTH_FAILED');
+    if (status === 404) return new Error('SUPABASE_SIGNAL_STORE_SCHEMA_MISSING');
+    return new Error(`SUPABASE_SIGNAL_STORE_HTTP_${status}`);
   }
 }
