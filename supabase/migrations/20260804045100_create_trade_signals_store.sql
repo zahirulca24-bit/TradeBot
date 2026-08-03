@@ -33,6 +33,13 @@ alter table public.trade_signals enable row level security;
 revoke all on table public.trade_signals from anon, authenticated;
 grant select, insert, update on table public.trade_signals to service_role;
 
+create policy trade_signals_deny_client_access
+on public.trade_signals
+for all
+to anon, authenticated
+using (false)
+with check (false);
+
 create or replace function public.touch_trade_signals_updated_at()
 returns trigger
 language plpgsql
