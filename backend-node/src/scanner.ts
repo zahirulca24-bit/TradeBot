@@ -2,8 +2,8 @@ import { z } from 'zod';
 import type { BybitMarketDataClient } from './marketData.js';
 import { postScannerJsonWithRetry } from './scannerRetry.js';
 
-const PYTHON_SCANNER_TIMEOUT_MS = 8000;
-const PYTHON_SCANNER_ATTEMPTS = 4;
+const PYTHON_SCANNER_TIMEOUT_MS = 2000;
+const PYTHON_SCANNER_ATTEMPTS = 3;
 
 const trendEngineResponseSchema = z.object({
   engine: z.literal('tradebot-python'),
