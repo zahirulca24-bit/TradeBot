@@ -116,6 +116,15 @@ function normalizeSupabaseUrl(value: string): string {
   return parsed.toString().replace(/\/$/, '');
 }
 
+function optionsFromEnvironment(): SignalStoreOptions {
+  const timeout = Number(process.env.SUPABASE_REQUEST_TIMEOUT_MS ?? 8_000);
+  return {
+    supabaseUrl: process.env.SUPABASE_URL ?? '',
+    secretKey: process.env.SUPABASE_SECRET_KEY ?? '',
+    requestTimeoutMs: timeout,
+  };
+}
+
 function mapDatabaseSignal(value: unknown): StoredSignal {
   const row = databaseSignalSchema.parse(value);
   return storedSignalSchema.parse({
@@ -158,15 +167,16 @@ export class SignalStore {
   private readonly requestTimeoutMs: number;
   private readonly fetchImpl: FetchLike;
 
-  public constructor(options: SignalStoreOptions) {
-    this.supabaseUrl = normalizeSupabaseUrl(options.supabaseUrl);
-    this.secretKey = options.secretKey.trim();
+  public constructor(options: SignalStoreOptions | string) {
+    const resolvedOptions = typeof options === 'string' ? optionsFromEnvironment() : options;
+    this.supabaseUrl = normalizeSupabaseUrl(resolvedOptions.supabaseUrl);
+    this.secretKey = resolvedOptions.secretKey.trim();
     if (this.secretKey.length < 32) throw new Error('INVALID_SUPABASE_SECRET_KEY');
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 8_000;
+    this.requestTimeoutMs = resolvedOptions.requestTimeoutMs ?? 8_000;
     if (!Number.isInteger(this.requestTimeoutMs) || this.requestTimeoutMs < 1_000 || this.requestTimeoutMs > 20_000) {
       throw new Error('INVALID_SUPABASE_REQUEST_TIMEOUT');
     }
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = resolvedOptions.fetchImpl ?? fetch;
   }
 
   public storageInfo() {
