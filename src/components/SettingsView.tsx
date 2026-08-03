@@ -4,12 +4,12 @@ import {
   Bell,
   FileText,
   Lock,
-  RefreshCw,
   Search,
   Settings,
   Shield,
   Sliders,
 } from 'lucide-react';
+import WatchdogStatusPanel from './WatchdogStatusPanel';
 
 interface SettingsViewProps {
   apiBaseUrl: string;
@@ -102,12 +102,10 @@ export default function SettingsView({ apiBaseUrl, onTriggerNoBackendWarning }: 
       )}
 
       {activeTab === 'diagnostics' && (
-        <section className="max-w-4xl rounded-xl border border-trading-border bg-card-bg p-5">
-          <div className="mb-4 flex items-center justify-between"><h3 className="text-sm font-semibold">Diagnostics</h3><button type="button" onClick={() => showDisconnected('Diagnostics refresh')} className="flex items-center gap-2 rounded-lg border border-trading-border px-3 py-2 text-xs"><RefreshCw className="h-4 w-4" />Refresh</button></div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {['Frontend: Ready','Backend: Not Connected','Bybit Demo: Not Connected','Market Data: No Data','Last Scan: No Data','Last Sync: No Data','Last Error: No Data','App Version: v0.1.0'].map((item) => <div key={item} className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs text-slate-300">{item}</div>)}
-          </div>
-        </section>
+        <WatchdogStatusPanel
+          apiBaseUrl={apiBaseUrl}
+          onTriggerNoBackendWarning={onTriggerNoBackendWarning}
+        />
       )}
 
       {activeTab === 'decision-log' && (
