@@ -83,7 +83,7 @@ test('marks a successful scan degraded when Bybit Demo health is unavailable', a
 });
 
 test('skips an overlapping watchdog run', async () => {
-  let release: ((value: ReturnType<typeof snapshot>) => void) | null = null;
+  let release!: (value: ReturnType<typeof snapshot>) => void;
   const pending = new Promise<ReturnType<typeof snapshot>>((resolve) => {
     release = resolve;
   });
@@ -94,7 +94,6 @@ test('skips an overlapping watchdog run', async () => {
   await watchdog.runNow('TEST');
 
   assert.equal(watchdog.getStatus().skippedOverlaps, 1);
-  assert.ok(release);
   release(snapshot());
   await first;
   assert.equal(watchdog.getStatus().state, 'HEALTHY');
