@@ -1,0 +1,25 @@
+name: Signal Store Tests
+
+on:
+  pull_request:
+    paths:
+      - 'backend-node/**'
+      - '.github/workflows/signal-store-tests.yml'
+
+jobs:
+  signal-store:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm install
+      - name: Run signal store tests
+        run: npm test
