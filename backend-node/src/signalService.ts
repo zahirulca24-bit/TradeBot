@@ -11,6 +11,11 @@ function requireTimestamp(value: number | null, code: string): number {
   return value;
 }
 
+function requirePositiveInteger(value: number | null, code: string): number {
+  if (value === null || !Number.isInteger(value) || value < 1) throw new Error(code);
+  return value;
+}
+
 function requireKey(value: string | null): string {
   if (value === null || value.length === 0) throw new Error('FINAL_CANDIDATE_KEY_MISSING');
   return value;
@@ -55,8 +60,12 @@ export class SignalService {
       entryPrice: candidate.entryPrice,
       stopLoss: requirePositive(candidate.stopLoss, 'FINAL_STOP_LOSS_MISSING'),
       targetPrice: requirePositive(candidate.targetPrice, 'FINAL_TARGET_PRICE_MISSING'),
+      riskDistance: requirePositive(candidate.riskDistance, 'FINAL_RISK_DISTANCE_MISSING'),
       riskRewardRatio: requirePositive(candidate.riskRewardRatio, 'FINAL_RISK_REWARD_MISSING'),
       riskBps: requirePositive(candidate.riskBps, 'FINAL_RISK_BPS_MISSING'),
+      swingPrice: requirePositive(candidate.swingPrice, 'FINAL_SWING_PRICE_MISSING'),
+      swingAgeCandles: requirePositiveInteger(candidate.swingAgeCandles, 'FINAL_SWING_AGE_MISSING'),
+      entryKey: candidate.entryKey,
       volumeRatio: candidate.volumeRatio,
       sweepDepthBps: candidate.sweepDepthBps,
       entryCandleCloseTimeMs: candidate.entryCandleCloseTimeMs,
