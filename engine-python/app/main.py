@@ -4,7 +4,10 @@ import hmac
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, status
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .trend import TrendCandle, analyze_one_hour_trend
 
 
 class Settings(BaseSettings):
@@ -16,7 +19,25 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
-app = FastAPI(title="TradeBot Python Strategy Engine", version="0.1.0")
+class TrendCandleRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    interval: str = Field(pattern=r"^60$")
+    startTimeMs: int = Field(gt=0)
+    closeTimeMs: int = Field(gt=0)
+    open: float = Field(gt=0)
+    high: float = Field(gt=0)
+    low: float = Field(gt=0)
+    close: float = Field(gt=0)
+    volume: float = Field(gt=0)
+    turnover: float = Field(gt=0)
+
+
+class TrendAnalysisRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    candles: list[TrendCandleRequest] = Field(min_length=200, max_length=500)
+
+
+app = FastAPI(title="TradeBot Python Strategy Engine", version="0.2.0")
 
 
 def load_settings() -> Settings | None:
@@ -32,21 +53,9 @@ def load_settings() -> Settings | None:
     return settings
 
 
-@app.get("/health")
-def health() -> dict[str, object]:
-    configured = load_settings() is not None
-    return {
-        "service": "tradebot-engine-python",
-        "status": "healthy" if configured else "degraded",
-        "tradingMode": "bybit_demo" if configured else "unconfigured",
-        "executionAuthority": False,
-    }
-
-
-@app.get("/ready")
-def ready(
+def require_internal_service(
     x_internal_service_token: Annotated[str | None, Header()] = None,
-) -> dict[str, object]:
+) -> Settings:
     settings = load_settings()
     if settings is None:
         raise HTTPException(
@@ -62,10 +71,87 @@ def ready(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "INVALID_INTERNAL_TOKEN", "ready": False},
         )
+    return settings
 
+
+@app.get("/health")
+def health() -> dict[str, object]:
+    configured = load_settings() is not None
+    return {
+        "service": "tradebot-engine-python",
+        "status": "healthy" if configured else "degraded",
+        "tradingMode": "bybit_demo" if configured else "unconfigured",
+        "executionAuthority": False,
+        "scannerCapabilities": ["ONE_HOUR_EMA_TREND"],
+    }
+
+
+@app.get("/ready")
+def ready(
+    x_internal_service_token: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    require_internal_service(x_internal_service_token)
     return {
         "service": "tradebot-engine-python",
         "ready": True,
         "tradingMode": "bybit_demo",
         "executionAuthority": False,
+        "scannerCapabilities": ["ONE_HOUR_EMA_TREND"],
+    }
+
+
+@app.post("/analysis/trend")
+def analyze_trend(
+    request: TrendAnalysisRequest,
+    x_internal_service_token: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    require_internal_service(x_internal_service_token)
+
+    if any(candle.symbol != request.symbol for candle in request.candles):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "CANDLE_SYMBOL_MISMATCH"},
+        )
+
+    try:
+        analysis = analyze_one_hour_trend(
+            [
+                TrendCandle(
+                    symbol=candle.symbol,
+                    interval=candle.interval,
+                    start_time_ms=candle.startTimeMs,
+                    close_time_ms=candle.closeTimeMs,
+                    open=candle.open,
+                    high=candle.high,
+                    low=candle.low,
+                    close=candle.close,
+                    volume=candle.volume,
+                    turnover=candle.turnover,
+                )
+                for candle in request.candles
+            ]
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": str(error)},
+        ) from error
+
+    return {
+        "engine": "tradebot-python",
+        "strategyStage": "ONE_HOUR_TREND",
+        "symbol": analysis.symbol,
+        "interval": analysis.interval,
+        "direction": analysis.direction.value,
+        "passed": analysis.passed,
+        "indicators": {
+            "latestClose": analysis.latest_close,
+            "ema20": analysis.ema20,
+            "ema50": analysis.ema50,
+            "ema200": analysis.ema200,
+        },
+        "candleCount": analysis.candle_count,
+        "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,
+        "reasons": list(analysis.reasons),
+        "actionable": False,
     }
