@@ -1,17 +1,57 @@
 import React from 'react';
-import { Activity, AlertTriangle, Clock, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck } from 'lucide-react';
 
 interface WatchdogStatusPanelProps {
   apiBaseUrl: string;
   onTriggerNoBackendWarning: (message: string) => void;
 }
 
-type WatchdogState = 'DISABLED' | 'IDLE' | 'RUNNING' | 'HEALTHY' | 'DEGRADED' | 'FAILED';
+type WorkerState = 'DISABLED' | 'IDLE' | 'RUNNING' | 'HEALTHY' | 'DEGRADED' | 'FAILED';
+
+interface PipelineCounts {
+  universe: number;
+  oneHour: number;
+  fifteenMinute: number;
+  fiveMinute: number;
+  finalCandidates: number;
+}
+
+interface SignalWorkerStatus {
+  service: 'automated-signal-scanner';
+  enabled: boolean;
+  state: Exclude<WorkerState, 'DEGRADED'>;
+  intervalMs: number;
+  runTimeoutMs: number;
+  running: boolean;
+  nextRunAt: string | null;
+  lastSuccessAt: string | null;
+  consecutiveFailures: number;
+  skippedOverlaps: number;
+  skippedDuplicateCycles: number;
+  signalPersistenceEnabled: true;
+  executionEnabled: false;
+  lastRun: null | {
+    runId: string;
+    trigger: 'SCHEDULED' | 'STARTUP' | 'TEST';
+    scheduledAt: string;
+    startedAt: string;
+    finishedAt: string | null;
+    durationMs: number | null;
+    state: 'RUNNING' | 'HEALTHY' | 'FAILED';
+    pipelineCounts: PipelineCounts | null;
+    persistence: null | {
+      insertedCount: number;
+      duplicateSuppressedCount: number;
+      totalStored: number;
+    };
+    issues: string[];
+  };
+}
 
 interface WatchdogStatus {
   service: 'pipeline-watchdog';
   enabled: boolean;
-  state: WatchdogState;
+  state: WorkerState;
   intervalMs: number;
   runTimeoutMs: number;
   running: boolean;
@@ -21,7 +61,9 @@ interface WatchdogStatus {
   skippedOverlaps: number;
   skippedDuplicateCycles: number;
   signalPersistenceEnabled: false;
+  supervisedSignalPersistenceEnabled: true;
   executionEnabled: false;
+  signalWorker: SignalWorkerStatus | null;
   lastRun: null | {
     runId: string;
     trigger: 'SCHEDULED' | 'STARTUP' | 'TEST';
@@ -35,17 +77,13 @@ interface WatchdogStatus {
       marketData: boolean;
       pythonEngine: boolean;
       bybitDemo: boolean;
+      signalWorker: boolean;
       clockSkewMs: number | null;
       pythonReason: string | null;
       demoReason: string | null;
+      signalWorkerReason: string | null;
     };
-    counts: null | {
-      universe: number;
-      oneHour: number;
-      fifteenMinute: number;
-      fiveMinute: number;
-      finalCandidates: number;
-    };
+    counts: PipelineCounts | null;
     issues: string[];
   };
 }
@@ -56,11 +94,24 @@ function formatTime(value: string | null): string {
   return Number.isNaN(parsed.getTime()) ? 'Invalid timestamp' : parsed.toLocaleString();
 }
 
-function stateClass(state: WatchdogState): string {
+function stateClass(state: WorkerState): string {
   if (state === 'HEALTHY') return 'text-emerald-400';
   if (state === 'DEGRADED' || state === 'RUNNING') return 'text-amber-400';
   if (state === 'FAILED' || state === 'DISABLED') return 'text-rose-400';
   return 'text-slate-300';
+}
+
+function MetricCard({ label, value, valueClass = 'text-slate-200' }: {
+  label: string;
+  value: React.ReactNode;
+  valueClass?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-trading-border bg-dark-bg p-3">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">{label}</span>
+      <div className={`mt-1 font-mono text-sm font-bold ${valueClass}`}>{value}</div>
+    </div>
+  );
 }
 
 export default function WatchdogStatusPanel({
@@ -106,9 +157,14 @@ export default function WatchdogStatusPanel({
     return () => window.clearInterval(timer);
   }, [loadStatus]);
 
-  const counts = status?.lastRun?.counts;
+  const worker = status?.signalWorker;
+  const counts = worker?.lastRun?.pipelineCounts ?? status?.lastRun?.counts;
+  const persistence = worker?.lastRun?.persistence;
   const dependencies = status?.lastRun?.dependencies;
-  const issues = status?.lastRun?.issues ?? [];
+  const issues = [
+    ...(worker?.lastRun?.issues ?? []),
+    ...(status?.lastRun?.issues ?? []),
+  ].filter((issue, index, all) => all.indexOf(issue) === index);
 
   return (
     <section className="max-w-5xl rounded-xl border border-trading-border bg-card-bg p-5">
@@ -116,10 +172,10 @@ export default function WatchdogStatusPanel({
         <div>
           <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
             <Activity className="h-4 w-4 text-brand-bybit" />
-            Pipeline Watchdog Worker
+            Signal Automation & Pipeline Watchdog
           </h3>
           <p className="mt-1 text-xs text-slate-500">
-            Supervises the 50 → 20 → 10 → 3 pipeline every 15 minutes. It does not persist signals or execute trades.
+            The signal worker scans and persists final candidates every 15 minutes. The watchdog supervises it. Trade execution remains disabled.
           </p>
         </div>
         <button
@@ -140,48 +196,80 @@ export default function WatchdogStatusPanel({
       )}
 
       {status && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">State</span>
-              <div className={`mt-1 font-mono text-sm font-bold ${stateClass(status.state)}`}>{status.state}</div>
+        <div className="space-y-5">
+          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+            <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-200">
+              <Database className="h-4 w-4 text-emerald-400" />
+              Automated Signal Scanner → Supabase
             </div>
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Interval</span>
-              <div className="mt-1 font-mono text-sm text-slate-200">{Math.round(status.intervalMs / 60_000)} min</div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <MetricCard
+                label="Worker State"
+                value={worker?.state ?? 'UNAVAILABLE'}
+                valueClass={stateClass(worker?.state ?? 'FAILED')}
+              />
+              <MetricCard label="Interval" value={worker ? `${Math.round(worker.intervalMs / 60_000)} min` : '—'} />
+              <MetricCard label="Failures" value={worker?.consecutiveFailures ?? '—'} />
+              <MetricCard label="Overlap Blocks" value={worker?.skippedOverlaps ?? '—'} />
             </div>
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Failures</span>
-              <div className="mt-1 font-mono text-sm text-slate-200">{status.consecutiveFailures}</div>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
+                <div className="flex items-center gap-2 text-slate-500"><Clock className="h-4 w-4" />Next signal scan</div>
+                <div className="mt-1 text-slate-200">{formatTime(worker?.nextRunAt ?? null)}</div>
+              </div>
+              <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
+                <div className="flex items-center gap-2 text-slate-500"><ShieldCheck className="h-4 w-4" />Last persisted cycle</div>
+                <div className="mt-1 text-slate-200">{formatTime(worker?.lastSuccessAt ?? null)}</div>
+              </div>
+              <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
+                <div className="text-slate-500">Last run duration</div>
+                <div className="mt-1 font-mono text-slate-200">
+                  {worker?.lastRun?.durationMs === null || worker?.lastRun?.durationMs === undefined
+                    ? 'Not completed'
+                    : `${worker.lastRun.durationMs} ms`}
+                </div>
+              </div>
             </div>
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Overlap Blocks</span>
-              <div className="mt-1 font-mono text-sm text-slate-200">{status.skippedOverlaps}</div>
-            </div>
+            {persistence && (
+              <div className="mt-3 grid grid-cols-3 gap-3">
+                <MetricCard label="Inserted" value={persistence.insertedCount} />
+                <MetricCard label="Duplicates Updated" value={persistence.duplicateSuppressedCount} />
+                <MetricCard label="Total Stored" value={persistence.totalStored} />
+              </div>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
-              <div className="flex items-center gap-2 text-slate-500"><Clock className="h-4 w-4" />Next run</div>
-              <div className="mt-1 text-slate-200">{formatTime(status.nextRunAt)}</div>
+          <div className="rounded-xl border border-trading-border p-4">
+            <div className="mb-3 text-xs font-semibold text-slate-200">Pipeline Watchdog Supervisor</div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <MetricCard label="State" value={status.state} valueClass={stateClass(status.state)} />
+              <MetricCard label="Interval" value={`${Math.round(status.intervalMs / 60_000)} min`} />
+              <MetricCard label="Failures" value={status.consecutiveFailures} />
+              <MetricCard label="Overlap Blocks" value={status.skippedOverlaps} />
             </div>
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
-              <div className="flex items-center gap-2 text-slate-500"><ShieldCheck className="h-4 w-4" />Last success</div>
-              <div className="mt-1 text-slate-200">{formatTime(status.lastSuccessAt)}</div>
-            </div>
-            <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
-              <div className="text-slate-500">Last run duration</div>
-              <div className="mt-1 font-mono text-slate-200">
-                {status.lastRun?.durationMs === null || status.lastRun?.durationMs === undefined
-                  ? 'Not completed'
-                  : `${status.lastRun.durationMs} ms`}
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
+                <div className="flex items-center gap-2 text-slate-500"><Clock className="h-4 w-4" />Next watchdog check</div>
+                <div className="mt-1 text-slate-200">{formatTime(status.nextRunAt)}</div>
+              </div>
+              <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
+                <div className="flex items-center gap-2 text-slate-500"><ShieldCheck className="h-4 w-4" />Last healthy supervision</div>
+                <div className="mt-1 text-slate-200">{formatTime(status.lastSuccessAt)}</div>
+              </div>
+              <div className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
+                <div className="text-slate-500">Last check duration</div>
+                <div className="mt-1 font-mono text-slate-200">
+                  {status.lastRun?.durationMs === null || status.lastRun?.durationMs === undefined
+                    ? 'Not completed'
+                    : `${status.lastRun.durationMs} ms`}
+                </div>
               </div>
             </div>
           </div>
 
           {counts && (
             <div className="rounded-lg border border-trading-border bg-dark-bg p-4">
-              <div className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Last pipeline counts</div>
+              <div className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Last automated pipeline counts</div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
                 {[
                   ['Top Universe', counts.universe],
@@ -200,11 +288,12 @@ export default function WatchdogStatusPanel({
           )}
 
           {dependencies && (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 ['Market Data', dependencies.marketData, dependencies.clockSkewMs === null ? null : `${dependencies.clockSkewMs} ms skew`],
                 ['Python Engine', dependencies.pythonEngine, dependencies.pythonReason],
                 ['Bybit Demo', dependencies.bybitDemo, dependencies.demoReason],
+                ['Signal Worker', dependencies.signalWorker, dependencies.signalWorkerReason],
               ].map(([label, ok, detail]) => (
                 <div key={String(label)} className="rounded-lg border border-trading-border bg-dark-bg p-3 text-xs">
                   <div className={ok ? 'text-emerald-400' : 'text-rose-400'}>{label}: {ok ? 'ONLINE' : 'FAILED'}</div>
@@ -217,7 +306,7 @@ export default function WatchdogStatusPanel({
           {issues.length > 0 && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-amber-300">
-                <AlertTriangle className="h-4 w-4" />Last run issues
+                <AlertTriangle className="h-4 w-4" />Latest automation issues
               </div>
               <div className="mt-2 flex flex-wrap gap-2">
                 {issues.map((issue) => (
@@ -230,7 +319,7 @@ export default function WatchdogStatusPanel({
           )}
 
           <div className="text-[10px] text-slate-600">
-            Safety lock: signal persistence OFF · execution OFF · duplicate cycle blocks {status.skippedDuplicateCycles}
+            Safety lock: Supabase signal persistence ON · watchdog persistence OFF · execution OFF · worker duplicate-cycle blocks {worker?.skippedDuplicateCycles ?? 0}
           </div>
         </div>
       )}
