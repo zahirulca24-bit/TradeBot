@@ -8,6 +8,7 @@ import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import DashboardView from './components/DashboardView';
 import MarketScannerView from './components/MarketScannerView';
+import FinalRiskPipelinePanel from './components/FinalRiskPipelinePanel';
 import FiveMinutePipelinePanel from './components/FiveMinutePipelinePanel';
 import FifteenMinutePipelinePanel from './components/FifteenMinutePipelinePanel';
 import SignalsView from './components/SignalsView';
@@ -103,6 +104,10 @@ export default function App() {
               )}
               {currentRoute === 'market-scanner' && (
                 <div className="space-y-6">
+                  <FinalRiskPipelinePanel
+                    apiBaseUrl={apiBaseUrl}
+                    onTriggerNoBackendWarning={triggerNoBackendWarning}
+                  />
                   <FiveMinutePipelinePanel
                     apiBaseUrl={apiBaseUrl}
                     onTriggerNoBackendWarning={triggerNoBackendWarning}

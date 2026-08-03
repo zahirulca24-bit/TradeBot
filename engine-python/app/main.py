@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .entry import EntryCandle, EntryDirection, analyze_five_minute_entry
+from .risk import RiskCandle, RiskDirection, analyze_final_risk_candidate
 from .setup import SetupCandle, SetupDirection, analyze_fifteen_minute_setup
 from .trend import TrendCandle, analyze_one_hour_trend
 
@@ -77,7 +78,16 @@ class EntryAnalysisRequest(BaseModel):
     candles: list[EntryCandleRequest] = Field(min_length=21, max_length=500)
 
 
-app = FastAPI(title="TradeBot Python Strategy Engine", version="0.4.0")
+class RiskAnalysisRequest(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Z0-9]{3,30}$")
+    direction: RiskDirection
+    entryPrice: float = Field(gt=0)
+    entryCandleCloseTimeMs: int = Field(gt=0)
+    entryKey: str = Field(pattern=r"^[A-Z0-9]{3,30}:(LONG|SHORT):\d+$")
+    candles: list[SetupCandleRequest] = Field(min_length=5, max_length=500)
+
+
+app = FastAPI(title="TradeBot Python Strategy Engine", version="0.5.0")
 
 
 def load_settings() -> Settings | None:
@@ -119,6 +129,7 @@ def scanner_capabilities() -> list[str]:
         "ONE_HOUR_EMA_TREND",
         "FIFTEEN_MINUTE_BREAKOUT_RETEST",
         "FIVE_MINUTE_LIQUIDITY_SWEEP_VOLUME_ENTRY",
+        "FIFTEEN_MINUTE_SWING_RISK_RR2",
     ]
 
 
@@ -332,6 +343,81 @@ def analyze_entry(
         },
         "candleCount": analysis.candle_count,
         "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,
+        "reasons": list(analysis.reasons),
+        "actionable": False,
+    }
+
+
+@app.post("/analysis/risk")
+def analyze_risk(
+    request: RiskAnalysisRequest,
+    x_internal_service_token: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    require_internal_service(x_internal_service_token)
+
+    if any(candle.symbol != request.symbol for candle in request.candles):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "CANDLE_SYMBOL_MISMATCH"},
+        )
+
+    try:
+        analysis = analyze_final_risk_candidate(
+            [
+                RiskCandle(
+                    symbol=candle.symbol,
+                    interval=candle.interval,
+                    start_time_ms=candle.startTimeMs,
+                    close_time_ms=candle.closeTimeMs,
+                    open=candle.open,
+                    high=candle.high,
+                    low=candle.low,
+                    close=candle.close,
+                    volume=candle.volume,
+                    turnover=candle.turnover,
+                )
+                for candle in request.candles
+            ],
+            request.direction,
+            entry_price=request.entryPrice,
+            entry_candle_close_time_ms=request.entryCandleCloseTimeMs,
+            entry_key=request.entryKey,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": str(error)},
+        ) from error
+
+    return {
+        "engine": "tradebot-python",
+        "strategyStage": "FINAL_RISK_CANDIDATE",
+        "symbol": analysis.symbol,
+        "interval": analysis.interval,
+        "direction": analysis.direction.value,
+        "passed": analysis.passed,
+        "entry": {
+            "entryPrice": analysis.entry_price,
+            "entryCandleCloseTimeMs": analysis.entry_candle_close_time_ms,
+            "entryKey": analysis.entry_key,
+        },
+        "risk": {
+            "stopLoss": analysis.stop_loss,
+            "targetPrice": analysis.target_price,
+            "riskDistance": analysis.risk_distance,
+            "riskBps": analysis.risk_bps,
+            "riskRewardRatio": analysis.risk_reward_ratio,
+            "minimumRiskRewardRatio": 2.0,
+            "swingPrice": analysis.swing_price,
+            "swingCandleCloseTimeMs": analysis.swing_candle_close_time_ms,
+            "swingAgeCandles": analysis.swing_age_candles,
+            "swingLookbackCandles": 40,
+            "pivotLeftCandles": 1,
+            "pivotRightCandles": 1,
+        },
+        "candleCount": analysis.candle_count,
+        "latestCandleCloseTimeMs": analysis.latest_candle_close_time_ms,
+        "signalCandidateKey": analysis.signal_candidate_key,
         "reasons": list(analysis.reasons),
         "actionable": False,
     }
