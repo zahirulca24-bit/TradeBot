@@ -44,12 +44,12 @@ def make_candles(
     start = 21 * FIVE_MINUTES_MS
     if direction is EntryDirection.LONG:
         level = min(candle.low for candle in candles)
-        low = level - 0.5 if sweep else level + 0.1
+        low = level - 0.5 if sweep else level
         close = level + 0.2 if reclaim else level - 0.2
         high = max(close + 0.5, level + 0.5)
     else:
         level = max(candle.high for candle in candles)
-        high = level + 0.5 if sweep else level - 0.1
+        high = level + 0.5 if sweep else level
         close = level - 0.2 if reclaim else level + 0.2
         low = min(close - 0.5, level - 0.5)
 
