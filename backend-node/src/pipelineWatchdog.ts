@@ -109,7 +109,6 @@ export class PipelineWatchdog {
   private readonly now: () => number;
   private timer: NodeJS.Timeout | null = null;
   private activeRun: Promise<void> | null = null;
-  private nextRunAtMs: number | null = null;
   private lastScheduledCycleId: number | null = null;
   private status: PipelineWatchdogStatus;
 
@@ -135,14 +134,12 @@ export class PipelineWatchdog {
 
   public start(): void {
     if (!this.options.enabled || this.timer) return;
-    const firstRunAt = this.now() + this.options.initialDelayMs;
-    this.schedule(firstRunAt, 'STARTUP');
+    this.schedule(this.now() + this.options.initialDelayMs, 'STARTUP');
   }
 
   public stop(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.nextRunAtMs = null;
     this.status.nextRunAt = null;
   }
 
@@ -162,9 +159,11 @@ export class PipelineWatchdog {
 
     if (this.activeRun) {
       this.status.skippedOverlaps += 1;
-      const issues = this.status.lastRun?.issues ?? [];
       if (this.status.lastRun) {
-        this.status.lastRun.issues = uniqueIssues([...issues, 'PREVIOUS_WATCHDOG_RUN_STILL_ACTIVE']);
+        this.status.lastRun.issues = uniqueIssues([
+          ...this.status.lastRun.issues,
+          'PREVIOUS_WATCHDOG_RUN_STILL_ACTIVE',
+        ]);
       }
       this.log('WATCHDOG_OVERLAP_SKIPPED', { cycleId, trigger });
       return;
@@ -177,42 +176,37 @@ export class PipelineWatchdog {
     this.status.running = true;
     this.status.state = 'RUNNING';
 
-    const timeout = new Promise<'timeout'>((resolve) => {
-      const timer = setTimeout(() => resolve('timeout'), this.options.runTimeoutMs);
-      timer.unref?.();
-    });
-
-    const outcome = await Promise.race([runPromise.then(() => 'completed' as const), timeout]);
-    if (outcome === 'timeout') {
-      const nowMs = this.now();
+    const timeoutTimer = setTimeout(() => {
       const current = this.status.lastRun;
-      if (current?.state === 'RUNNING') {
-        current.finishedAt = iso(nowMs);
-        current.durationMs = nowMs - Date.parse(current.startedAt);
-        current.state = 'FAILED';
-        current.issues = uniqueIssues([...current.issues, 'WATCHDOG_RUN_TIMEOUT']);
-      }
+      if (!current || current.cycleId !== cycleId || current.state !== 'RUNNING') return;
+      current.state = 'FAILED';
+      current.issues = uniqueIssues([...current.issues, 'WATCHDOG_RUN_TIMEOUT']);
       this.status.state = 'FAILED';
-      this.status.consecutiveFailures += 1;
-      this.log('WATCHDOG_RUN_TIMEOUT', { cycleId, trigger, timeoutMs: this.options.runTimeoutMs });
-    }
+      this.log('WATCHDOG_RUN_TIMEOUT', {
+        cycleId,
+        trigger,
+        timeoutMs: this.options.runTimeoutMs,
+      });
+    }, this.options.runTimeoutMs);
+    timeoutTimer.unref?.();
 
-    void runPromise.finally(() => {
+    try {
+      await runPromise;
+    } finally {
+      clearTimeout(timeoutTimer);
       if (this.activeRun === runPromise) {
         this.activeRun = null;
         this.status.running = false;
       }
-    });
+    }
   }
 
   private schedule(targetMs: number, trigger: WatchdogTrigger): void {
-    this.nextRunAtMs = targetMs;
     this.status.nextRunAt = iso(targetMs);
     const delay = Math.max(0, targetMs - this.now());
     this.timer = setTimeout(() => {
       const scheduledAtMs = targetMs;
-      const nextTarget = targetMs + this.options.intervalMs;
-      this.schedule(nextTarget, 'SCHEDULED');
+      this.schedule(targetMs + this.options.intervalMs, 'SCHEDULED');
       void this.runNow(trigger, scheduledAtMs);
     }, delay);
     this.timer.unref?.();
@@ -224,9 +218,8 @@ export class PipelineWatchdog {
     cycleId: number,
   ): Promise<void> {
     const startedAtMs = this.now();
-    const runId = `watchdog:${cycleId}:${startedAtMs}`;
     const run: WatchdogRunRecord = {
-      runId,
+      runId: `watchdog:${cycleId}:${startedAtMs}`,
       trigger,
       cycleId,
       scheduledAt: iso(scheduledAtMs),
@@ -292,29 +285,25 @@ export class PipelineWatchdog {
         fiveMinute: pipeline.fiveMinute.selectedCount,
         finalCandidates: pipeline.finalCandidates.selectedCount,
       };
+      run.issues = uniqueIssues([...run.issues, ...this.validatePipeline(pipeline)]);
 
-      run.issues.push(...this.validatePipeline(pipeline));
-      run.issues = uniqueIssues(run.issues);
-
-      const hasHardFailure = run.issues.some((issue) =>
+      const hardFailure = run.issues.some((issue) =>
         [
+          'WATCHDOG_RUN_TIMEOUT',
           'PIPELINE_LIMIT_VIOLATION',
           'PIPELINE_STAGE_ORDER_VIOLATION',
           'PIPELINE_SAFETY_FLAG_VIOLATION',
           'PIPELINE_TIMESTAMP_INVALID',
         ].includes(issue),
       );
-
-      run.state = hasHardFailure ? 'FAILED' : run.issues.length > 0 ? 'DEGRADED' : 'HEALTHY';
+      run.state = hardFailure ? 'FAILED' : run.issues.length > 0 ? 'DEGRADED' : 'HEALTHY';
     } catch (error) {
       run.issues = uniqueIssues([...run.issues, errorCode(error, 'WATCHDOG_RUN_FAILED')]);
       run.state = 'FAILED';
     } finally {
       const finishedAtMs = this.now();
-      if (run.finishedAt === null) {
-        run.finishedAt = iso(finishedAtMs);
-        run.durationMs = finishedAtMs - startedAtMs;
-      }
+      run.finishedAt = iso(finishedAtMs);
+      run.durationMs = finishedAtMs - startedAtMs;
 
       if (run.state === 'HEALTHY' || run.state === 'DEGRADED') {
         this.status.lastSuccessAt = run.finishedAt;
@@ -329,24 +318,29 @@ export class PipelineWatchdog {
 
   private validatePipeline(pipeline: PipelineSnapshot): string[] {
     const issues: string[] = [];
-    const counts = [
-      pipeline.universe.selectedCount,
-      pipeline.oneHour.selectedCount,
-      pipeline.fifteenMinute.selectedCount,
-      pipeline.fiveMinute.selectedCount,
-      pipeline.finalCandidates.selectedCount,
-    ];
+    const universeCount = pipeline.universe.selectedCount;
+    const oneHourCount = pipeline.oneHour.selectedCount;
+    const fifteenMinuteCount = pipeline.fifteenMinute.selectedCount;
+    const fiveMinuteCount = pipeline.fiveMinute.selectedCount;
+    const finalCandidateCount = pipeline.finalCandidates.selectedCount;
 
     if (
-      counts[0] > 50 ||
-      counts[1] > 20 ||
-      counts[2] > 10 ||
-      counts[3] > 3 ||
-      counts[4] > 3
+      universeCount > 50 ||
+      oneHourCount > 20 ||
+      fifteenMinuteCount > 10 ||
+      fiveMinuteCount > 3 ||
+      finalCandidateCount > 3
     ) {
       issues.push('PIPELINE_LIMIT_VIOLATION');
     }
-    if (!(counts[0] >= counts[1] && counts[1] >= counts[2] && counts[2] >= counts[3] && counts[3] >= counts[4])) {
+    if (
+      !(
+        universeCount >= oneHourCount &&
+        oneHourCount >= fifteenMinuteCount &&
+        fifteenMinuteCount >= fiveMinuteCount &&
+        fiveMinuteCount >= finalCandidateCount
+      )
+    ) {
       issues.push('PIPELINE_STAGE_ORDER_VIOLATION');
     }
     if (pipeline.actionable || pipeline.executionEnabled || pipeline.signalGenerationEnabled) {
