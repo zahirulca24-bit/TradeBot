@@ -6,6 +6,7 @@ import { BybitDemoClient } from './bybitDemo.js';
 import { DashboardService } from './dashboard.js';
 import { FiveMinutePipelineService } from './fiveMinutePipeline.js';
 import { BybitMarketDataClient } from './marketData.js';
+import { PipelineWatchdog } from './pipelineWatchdog.js';
 import { checkPythonEngineReady } from './pythonEngine.js';
 import { ScannerService } from './scanner.js';
 import { SignalService } from './signalService.js';
@@ -31,6 +32,10 @@ const envSchema = z.object({
   BYBIT_DEMO_RECV_WINDOW: z.coerce.number().int().min(1000).max(10000).default(5000),
   BYBIT_DEMO_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(10000).default(5000),
   SIGNAL_STORE_PATH: z.string().min(1).default('./data/signals.json'),
+  WATCHDOG_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  WATCHDOG_INTERVAL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(900_000),
+  WATCHDOG_INITIAL_DELAY_MS: z.coerce.number().int().min(0).max(300_000).default(30_000),
+  WATCHDOG_RUN_TIMEOUT_MS: z.coerce.number().int().min(60_000).max(840_000).default(780_000),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
@@ -84,6 +89,42 @@ const signalStore = parsedEnv.success ? new SignalStore(parsedEnv.data.SIGNAL_ST
 const signalService =
   fiveMinutePipeline && signalStore ? new SignalService(fiveMinutePipeline, signalStore) : null;
 
+async function getPythonReadiness() {
+  if (!parsedEnv.success) {
+    return { ready: false, reason: 'INVALID_ENVIRONMENT', attempts: 0, upstreamStatus: null };
+  }
+  return checkPythonEngineReady({
+    baseUrl: parsedEnv.data.PYTHON_ENGINE_URL,
+    internalServiceToken: parsedEnv.data.INTERNAL_SERVICE_TOKEN,
+    timeoutMs: parsedEnv.data.PYTHON_READY_TIMEOUT_MS,
+    attempts: parsedEnv.data.PYTHON_READY_ATTEMPTS,
+  });
+}
+
+const watchdog =
+  parsedEnv.success && fiveMinutePipeline && marketData
+    ? new PipelineWatchdog({
+        enabled: parsedEnv.data.WATCHDOG_ENABLED,
+        intervalMs: parsedEnv.data.WATCHDOG_INTERVAL_MS,
+        initialDelayMs: parsedEnv.data.WATCHDOG_INITIAL_DELAY_MS,
+        runTimeoutMs: parsedEnv.data.WATCHDOG_RUN_TIMEOUT_MS,
+        pipeline: fiveMinutePipeline,
+        marketData,
+        getPythonReadiness,
+        getDemoHealth: async () => {
+          try {
+            const summary = await dashboard.getSummary();
+            return { connected: summary.connected, reason: summary.reason };
+          } catch (error) {
+            return {
+              connected: false,
+              reason: error instanceof Error ? error.message : 'BYBIT_DEMO_UNAVAILABLE',
+            };
+          }
+        },
+      })
+    : null;
+
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
 app.use(
@@ -125,18 +166,6 @@ function dashboardFailure(response: express.Response, error: unknown) {
   });
 }
 
-async function getPythonReadiness() {
-  if (!parsedEnv.success) {
-    return { ready: false, reason: 'INVALID_ENVIRONMENT', attempts: 0, upstreamStatus: null };
-  }
-  return checkPythonEngineReady({
-    baseUrl: parsedEnv.data.PYTHON_ENGINE_URL,
-    internalServiceToken: parsedEnv.data.INTERNAL_SERVICE_TOKEN,
-    timeoutMs: parsedEnv.data.PYTHON_READY_TIMEOUT_MS,
-    attempts: parsedEnv.data.PYTHON_READY_ATTEMPTS,
-  });
-}
-
 app.get('/health', (_request, response) => {
   response.status(200).json({
     service: 'tradebot-backend-node',
@@ -146,6 +175,8 @@ app.get('/health', (_request, response) => {
     marketDataConfigured: marketData !== null,
     bybitDemoConfigured: demoClient !== null,
     signalStoreConfigured: signalStore !== null,
+    watchdogConfigured: watchdog !== null,
+    watchdogEnabled: watchdog?.getStatus().enabled ?? false,
   });
 });
 
@@ -179,6 +210,7 @@ app.get('/ready', async (_request, response) => {
       marketData: { source: 'bybit-v5-public', clockSkewMs: clock.skewMs },
       dashboard: { demoAccountConfigured: demoClient !== null },
       signalStore: { configured: signalStore !== null },
+      watchdog: watchdog?.getStatus() ?? null,
     });
   } catch (error) {
     return response.status(503).json({
@@ -204,7 +236,13 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
       reason: 'INVALID_ENVIRONMENT',
       tradingMode: 'unconfigured',
       executionEnabled: false,
-      dependencies: { marketData: false, pythonEngine: false, bybitDemo: false, signalStore: false },
+      dependencies: {
+        marketData: false,
+        pythonEngine: false,
+        bybitDemo: false,
+        signalStore: false,
+        watchdog: false,
+      },
     });
   }
 
@@ -223,8 +261,10 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
         pythonEngine: ready,
         bybitDemo: demoClient !== null,
         signalStore: signalStore !== null,
+        watchdog: watchdog !== null,
       },
       clockSkewMs: clock.skewMs,
+      watchdog: watchdog?.getStatus() ?? null,
     });
   } catch (error) {
     return response.status(503).json({
@@ -237,9 +277,24 @@ app.get('/api/dashboard/system-health', async (_request, response) => {
         pythonEngine: false,
         bybitDemo: demoClient !== null,
         signalStore: signalStore !== null,
+        watchdog: watchdog !== null,
+      },
+      watchdog: watchdog?.getStatus() ?? null,
+    });
+  }
+});
+
+app.get('/api/watchdog/status', (_request, response) => {
+  if (!watchdog) {
+    return response.status(503).json({
+      error: {
+        code: 'WATCHDOG_NOT_CONFIGURED',
+        message: 'Pipeline watchdog is unavailable.',
+        actionable: false,
       },
     });
   }
+  return response.status(200).json(watchdog.getStatus());
 });
 
 app.post('/api/dashboard/engine/start', async (_request, response) => {
@@ -421,6 +476,14 @@ app.use((_request, response) => {
 });
 
 const port = parsedEnv.success ? parsedEnv.data.PORT : 8080;
-app.listen(port, '0.0.0.0', () => {
+const server = app.listen(port, '0.0.0.0', () => {
+  watchdog?.start();
   console.log(`TradeBot Node gateway listening on port ${port}`);
 });
+
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(signal, () => {
+    watchdog?.stop();
+    server.close(() => process.exit(0));
+  });
+}
