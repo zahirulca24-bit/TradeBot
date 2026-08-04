@@ -7,10 +7,7 @@ import React from 'react';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import DashboardView from './components/DashboardView';
-import MarketScannerView from './components/MarketScannerView';
-import FinalRiskPipelinePanel from './components/FinalRiskPipelinePanel';
-import FiveMinutePipelinePanel from './components/FiveMinutePipelinePanel';
-import FifteenMinutePipelinePanel from './components/FifteenMinutePipelinePanel';
+import UnifiedScannerPipelineView from './components/UnifiedScannerPipelineView';
 import WatchdogStatusPanel from './components/WatchdogStatusPanel';
 import SignalsView from './components/SignalsView';
 import ActiveTradesView from './components/ActiveTradesView';
@@ -109,19 +106,7 @@ export default function App() {
                     apiBaseUrl={apiBaseUrl}
                     onTriggerNoBackendWarning={triggerNoBackendWarning}
                   />
-                  <FinalRiskPipelinePanel
-                    apiBaseUrl={apiBaseUrl}
-                    onTriggerNoBackendWarning={triggerNoBackendWarning}
-                  />
-                  <FiveMinutePipelinePanel
-                    apiBaseUrl={apiBaseUrl}
-                    onTriggerNoBackendWarning={triggerNoBackendWarning}
-                  />
-                  <FifteenMinutePipelinePanel
-                    apiBaseUrl={apiBaseUrl}
-                    onTriggerNoBackendWarning={triggerNoBackendWarning}
-                  />
-                  <MarketScannerView
+                  <UnifiedScannerPipelineView
                     apiBaseUrl={apiBaseUrl}
                     onTriggerNoBackendWarning={triggerNoBackendWarning}
                   />
