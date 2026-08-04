@@ -42,6 +42,21 @@ function normalizeFetchError(error: unknown): string {
   return 'PYTHON_ENGINE_UNREACHABLE';
 }
 
+function isTransientStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function retryDelayMs(attempt: number, reason: string, status: number | null): number {
+  const coldStartLike =
+    reason === 'PYTHON_ENGINE_NON_JSON_RESPONSE' ||
+    reason === 'PYTHON_ENGINE_TIMEOUT' ||
+    reason === 'PYTHON_ENGINE_UNREACHABLE' ||
+    (status !== null && isTransientStatus(status));
+
+  if (coldStartLike) return Math.min(5_000 * attempt, 15_000);
+  return Math.min(1_000 * attempt, 3_000);
+}
+
 export async function checkPythonEngineReady(
   options: PythonReadinessOptions,
 ): Promise<PythonReadinessResult> {
@@ -88,7 +103,7 @@ export async function checkPythonEngineReady(
     }
 
     if (attempt < options.attempts) {
-      await sleep(Math.min(1000 * attempt, 3000));
+      await sleep(retryDelayMs(attempt, lastReason, lastStatus));
     }
   }
 
