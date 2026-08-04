@@ -11,6 +11,7 @@ import MarketScannerView from './components/MarketScannerView';
 import FinalRiskPipelinePanel from './components/FinalRiskPipelinePanel';
 import FiveMinutePipelinePanel from './components/FiveMinutePipelinePanel';
 import FifteenMinutePipelinePanel from './components/FifteenMinutePipelinePanel';
+import WatchdogStatusPanel from './components/WatchdogStatusPanel';
 import SignalsView from './components/SignalsView';
 import ActiveTradesView from './components/ActiveTradesView';
 import PerformanceView from './components/PerformanceView';
@@ -104,6 +105,10 @@ export default function App() {
               )}
               {currentRoute === 'market-scanner' && (
                 <div className="space-y-6">
+                  <WatchdogStatusPanel
+                    apiBaseUrl={apiBaseUrl}
+                    onTriggerNoBackendWarning={triggerNoBackendWarning}
+                  />
                   <FinalRiskPipelinePanel
                     apiBaseUrl={apiBaseUrl}
                     onTriggerNoBackendWarning={triggerNoBackendWarning}
